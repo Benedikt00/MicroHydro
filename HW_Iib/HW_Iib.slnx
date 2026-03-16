@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="HW_Iib/HW_Iib.vcxproj" Id="3e0ff2ba-d904-45fb-87cf-7ecac2e372e0" />
+</Solution>
