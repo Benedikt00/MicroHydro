@@ -1,3 +1,7 @@
+#include <hw_lib.h>
+#include <telegram_management.h>
+#include <webserver.h>
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Example_ESP32.ino
 //  ESP32 usage example for WebserverAbstraction — Access Point (hotspot) mode.
@@ -14,7 +18,6 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include "webserver_mh.h"
 
 // ── Access Point config ───────────────────────────────────────────────────────
 //  SSID must be ≤ 31 chars. Password must be ≥ 8 chars, or "" for open network.
