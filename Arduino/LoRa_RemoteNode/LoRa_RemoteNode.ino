@@ -24,7 +24,15 @@
 #include <LoRa.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+
+#include <WiFi.h>
+#include <WebServer.h>
+
+// ── WiFi credentials ──────────────────────────────────
+const char* SSID     = "MicroHydroRemoteNode";
+const char* PASSWORD = "Einstein123";
+
+WebServer        server(80);
 
 // ── Node identity ─────────────────────────────────────
 #define NODE_ID  "NODE1"
@@ -35,10 +43,6 @@
 #define LORA_DIO0  2
 #define LORA_FREQ  868E6    // Must match gateway
 
-// ── OLED ──────────────────────────────────────────────
-#define OLED_SDA  21
-#define OLED_SCL  22
-#define OLED_ADDR 0x3C
 
 // ── IO ────────────────────────────────────────────────
 #define LED_PIN    2        // Built-in LED on most ESP32 boards
@@ -46,8 +50,6 @@
 // ── Timing ────────────────────────────────────────────
 #define TX_INTERVAL_MS  30000UL   // 30 seconds
 #define ACK_TIMEOUT_MS   3000UL   // Wait 3 s for ACK
-
-Adafruit_SSD1306 display(128, 64, &Wire, -1);
 
 // ── State ─────────────────────────────────────────────
 long   packetNum      = 0;
@@ -59,29 +61,6 @@ bool   ledState       = false;
 String lastCmd        = "";
 unsigned long lastTx  = 0;
 
-// ═════════════════════════════════════════════════════
-//  OLED helpers
-// ═════════════════════════════════════════════════════
-void oledShow(String l1, String l2, String l3, String l4) {
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0,  0); display.println(l1);
-  display.setCursor(0, 16); display.println(l2);
-  display.setCursor(0, 32); display.println(l3);
-  display.setCursor(0, 48); display.println(l4);
-  display.display();
-}
-
-void updateOled() {
-  String ackStr  = lastAckOk ? "ACK OK" : "NO ACK";
-  String rssiStr = "Tx RSSI(ack):" + String(txRSSI);
-  String gwStr   = "GW RSSI:" + String(gwRSSI) + " dBm";
-  oledShow("=NODE= #" + String(packetNum),
-           ackStr + " LED:" + (ledState ? "ON" : "OFF"),
-           rssiStr,
-           gwStr);
-}
 
 // ═════════════════════════════════════════════════════
 //  Send packet + wait for ACK
@@ -99,9 +78,7 @@ void sendPacket() {
   LoRa.print(payload);
   LoRa.endPacket();
 
-  // Wait for ACK
-  oledShow("=NODE= #" + String(packetNum), "Waiting ACK...", "", "");
-
+  
   unsigned long t = millis();
   lastAckOk = false;
   while (millis() - t < ACK_TIMEOUT_MS) {
@@ -140,6 +117,7 @@ void sendPacket() {
 void handleCommand(String cmd) {
   cmd.trim();
   Serial.println("[CMD] " + cmd);
+  lastCmd = cmd
   if (cmd == "LED:ON") {
     ledState = true;
     digitalWrite(LED_PIN, HIGH);
@@ -149,6 +127,30 @@ void handleCommand(String cmd) {
   } else if (cmd == "PING") {
     // Just acknowledge — next packet will include response
   }
+}
+
+// ═════════════════════════════════════════════════════
+//  Web handlers
+// ═════════════════════════════════════════════════════
+void handleRoot() {
+  String h = "<!DOCTYPE html><html><head><meta charset='UTF-8'>"
+             "<meta http-equiv='refresh' content='5'>"
+             "<title>LoRa Gateway</title></head><body>"
+             "<h2>LoRa Gateway</h2>"
+             "<p>Packets received: " + String(packetNum) + "</p>"
+             "<p>Last RSSI: "        + String(txRSSI) + " dBm</p>"
+             "<p>Last SNR: "         + String(txSNR, 1) + " dB</p>"
+             "<p>Last message: <code>" + String(lastCmd) + "</code></p>"
+             "<hr>"
+             "<h3>Send command to node</h3>"
+             "<form action='/send' method='get'>"
+             "<input name='cmd' value='" + String(lastCmd) + "' size='30'>"
+             "<input type='submit' value='Send'>"
+             "</form>"
+            
+             "<hr><h3>Last Tyg</h3><pre>" + String(lastTx) + "</pre>"
+             "</body></html>";
+  server.send(200, "text/html", h);
 }
 
 // ═════════════════════════════════════════════════════
@@ -165,19 +167,32 @@ void setup() {
   LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
   if (!LoRa.begin(LORA_FREQ)) {
     Serial.println("[ERROR] LoRa init failed");
-    oledShow("LoRa FAILED", "Check wiring", "", "");
+    
     while (true) delay(1000);
   }
   LoRa.setSpreadingFactor(7);
   LoRa.setSignalBandwidth(125E3);
   LoRa.setTxPower(14);
   Serial.println("[OK] LoRa ready");
-  oledShow("LoRa OK", NODE_ID, "Ready", "");
   delay(1000);
 
   // Send first packet immediately
   sendPacket();
   lastTx = millis();
+
+  WiFi.begin(SSID, PASSWORD);
+  int t = 0;
+  while (WiFi.status() != WL_CONNECTED && t++ < 40) delay(500);
+
+  if (WiFi.status() == WL_CONNECTED) {
+    String ip = WiFi.localIP().toString();
+    Serial.println("[WiFi] " + ip);
+  } else {
+    Serial.println("[WiFi] FAILED");
+  }
+
+  server.on("/",     handleRoot);
+  server.begin();
 }
 
 // ═════════════════════════════════════════════════════
@@ -189,6 +204,8 @@ void loop() {
     sendPacket();
     lastTx = millis();
   }
+
+  server.handleClient();
 
   // Also listen for unsolicited commands between transmissions
   int sz = LoRa.parsePacket();

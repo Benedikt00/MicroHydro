@@ -15,11 +15,7 @@
  *    RST  → GPIO14
  *    DIO0 → GPIO2
  *
- *  SSD1306 → ESP32 (I2C):
- *    VCC → 3.3V
- *    GND → GND
- *    SDA → GPIO21
- *    SCL → GPIO22
+
  *
  *  Libraries needed (Library Manager):
  *    - LoRa  by Sandeep Mistry
@@ -120,7 +116,6 @@ void setup() {
   LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
   if (!LoRa.begin(LORA_FREQ)) {
     Serial.println("[ERROR] LoRa init failed");
-    oledShow("LoRa FAILED", "Check wiring", "", "");
     while (true) delay(1000);
   }
   LoRa.setSpreadingFactor(7);
@@ -129,8 +124,7 @@ void setup() {
   Serial.println("[OK] LoRa ready");
 
   // WiFi
-  oledShow("WiFi...", SSID, "", "");
-  WiFi.begin(SSID, PASSWORD);
+   WiFi.begin(SSID, PASSWORD);
   int t = 0;
   while (WiFi.status() != WL_CONNECTED && t++ < 40) delay(500);
 
@@ -138,11 +132,9 @@ void setup() {
     String ip = WiFi.localIP().toString();
     Serial.println("[WiFi] " + ip);
     addLog("IP: " + ip);
-    oledShow("WiFi OK", ip, "Waiting...", "");
   } else {
     Serial.println("[WiFi] FAILED");
     addLog("WiFi FAILED");
-    oledShow("WiFi FAILED", "No network", "", "");
   }
 
   server.on("/",     handleRoot);
