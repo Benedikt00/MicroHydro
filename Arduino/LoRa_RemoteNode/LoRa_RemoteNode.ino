@@ -56,8 +56,7 @@ long   packetNum      = 0;
 int    txRSSI         = 0;    // RSSI of last received packet (ACK) at this node
 float  txSNR          = 0.0;
 int    gwRSSI         = 0;    // RSSI reported by gateway in ACK
-bool   lastAckOk      = false;
-bool   ledState       = false;
+
 String lastCmd        = "";
 unsigned long lastTx  = 0;
 
