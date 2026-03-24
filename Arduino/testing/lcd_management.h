@@ -11,11 +11,11 @@ public:
 
 
 
-  LiquidCrystal_I2C lcd;  // ✅ declared at class level
+  LiquidCrystal_I2C lcd; 
 
 
   lcd_management()
-    : lcd(0x27, 20, 4) {  // ✅ initialized in initializer list
+    : lcd(0x27, 20, 4) {  
     lcd.init();
     lcd.backlight();
   }

@@ -1,12 +1,13 @@
 //#include "hw_lib.h"
-#include "telegram_management.h"
-#include "SD_management.h"
+//#include "telegram_management.h"
+//#include "SD_management.h"
 //#include "webserver.h"
-#include "lcd_management.h"
+//#include "lcd_management.h"
+#include "value_monitoring.h"
 
 int sd_cs = 5;
 
-telegram_management tel;
+//telegram_management tel;
 
 
 String incomeing = "123.456.7100000000001773778573";
@@ -19,7 +20,7 @@ void setup(){
     }
     Serial.println("Bgin");
 
-    SD_management sd(sd_cs);
+    /*SD_management sd(sd_cs);
     lcd_management ld;
 
     ld.power = 254.2;
@@ -36,7 +37,9 @@ void setup(){
 
     sd.write_telegram(incomeing);
 
-    Serial.println(tel.enc_outgoing_msg());
+    Serial.println(tel.enc_outgoing_msg());*/
+
+    value_window test_value(0.0, 5.0, 0.05, 3000);
     
 };
 
