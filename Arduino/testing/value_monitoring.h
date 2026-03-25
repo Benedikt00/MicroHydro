@@ -35,7 +35,7 @@ public:
         if ((current_value > target_value * (1 - max_error)) && (current_value < target_value * (1 + max_error))) {  //val in error bar
           return 1;
         } else {
-          Serial.println("Value not in Error bar");
+          Serial.println("Value not in Error bar after monitoring time");
           return 0;
         }
       } else {
