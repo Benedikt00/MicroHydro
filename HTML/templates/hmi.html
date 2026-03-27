@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+
+{% block title %}Steuerung{% endblock %}
+
+{% block extra_style %}
+  .modes {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-bottom: 16px;
+  }
+
+  .sp {
+    display: none;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 16px;
+  }
+
+  .sp.show { display: flex; }
+
+  .sp-top {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: #888;
+  }
+
+  .sp-top span { color: inherit; font-weight: 500; }
+
+  input[type=range] { width: 100%; accent-color: #111; }
+
+  .tbtn {
+    width: 100%;
+    padding: 10px;
+    font-size: 13px;
+    font-family: monospace;
+    border: 1px solid #ccc;
+    background: transparent;
+    color: inherit;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+
+  .tinfo {
+    font-size: 11px;
+    color: #888;
+    margin-top: 6px;
+    text-align: center;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .tbtn { border-color: #444; }
+  }
+{% endblock %}
+
+{% block content %}
+  <a href="/">Zur Anlagenübersicht</a>
+
+  <h2>Modus</h2>
+  <div class="modes">
+    {% set modes = [
+      (1, 'Stop'),
+      (2, 'Leistungsregelung'),
+      (3, 'Druckregelung'),
+      (4, 'Leistungsregelung (Nacht)'),
+      (5, 'Druckregelung (Nacht)'),
+      (6, 'Speicherbetrieb'),
+    ] %}
+    {% for num, label in modes %}
+      <button id="b{{ num }}" onclick="setMode({{ num }})">{{ label }}</button>
+    {% endfor %}
+  </div>
+
+  <div class="sp" id="sp">
+    <div class="sp-top" id="spLbl">Sollwert <span id="spV">0</span>%</div>
+    <input type="range" id="sl" min="0" max="340" value="0" step="1"
+      oninput="document.getElementById('spV').textContent = this.value"
+      onchange="send()"/>
+  </div>
+
+  <h2>Zeit</h2>
+  <button class="tbtn" onclick="syncTime()">Zeit synchronisieren</button>
+  <div class="tinfo" id="ti">nicht synchronisiert</div>
+
+  <script>
+    const POWER_MODES  = new Set([2, 4]);
+    const LEVEL_MODES  = new Set([3, 5]);
+    const SLIDER_MODES = new Set([2, 3, 4, 5]);
+    let mode = 0;
+
+    function setMode(m) {
+      mode = m;
+      for (let i = 1; i <= 6; i++)
+        document.getElementById('b' + i).className = (i === m) ? 'on' : '';
+
+      const sp = document.getElementById('sp');
+      const lb = document.getElementById('spLbl');
+      if (!SLIDER_MODES.has(m)) {
+        sp.classList.remove('show');
+      } else {
+        sp.classList.add('show');
+        lb.childNodes[0].textContent =
+          POWER_MODES.has(m) ? 'Leistung Sollwert ' : 'Pegel Sollwert ';
+      }
+      send();
+    }
+
+    async function send() {
+      const sp = parseInt(document.getElementById('sl').value);
+      try {
+        await fetch('/api', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mode,
+            powerSetpoint:    POWER_MODES.has(mode) ? sp : 0,
+            levelSetpoint: LEVEL_MODES.has(mode)  ? sp : 0,
+          }),
+        });
+      } catch(e) {}
+    }
+
+    async function syncTime() {
+      const e = Math.floor(Date.now() / 1000);
+      try {
+        await fetch('/api/time', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ epoch: e }),
+        });
+        document.getElementById('ti').textContent =
+          'synchronisiert: ' + new Date(e * 1000).toLocaleTimeString();
+      } catch(e) {}
+    }
+
+    async function poll() {
+      try {
+        const r = await fetch('/api');
+        if (!r.ok) return;
+        const d = await r.json();
+        if (document.activeElement.id !== 'sl') {
+          const m = d.mode ?? 1;
+          if (m !== mode) setMode(m);
+          const sp = POWER_MODES.has(m) ? (d.powerSetpoint    ?? 0)
+                   : LEVEL_MODES.has(m)  ? (d.levelSetpoint ?? 0) : 0;
+          document.getElementById('sl').value       = sp;
+          document.getElementById('spV').textContent = sp;
+        }
+      } catch(e) {}
+    }
+
+    setInterval(poll, 2000);
+    poll();
+  </script>
+{% endblock %}

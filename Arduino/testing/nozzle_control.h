@@ -4,10 +4,14 @@ public:
   float bar_normal{ 0.0 };
   float watt_normal{ 0.0 };
 
+  double dt, last_time;
+  double integral, previous, output = 0;
+  double kp, ki;
+
+  static float params[3];
 
   float setpoint_matrix[2][3] = { { 0.3, 0.5, 0.8 },
                                   { 0.3, 0.5, 0.8 } };
-
 
   int setpoints_per_nozzle = sizeof(setpoint_matrix[0])/sizeof(*setpoint_matrix[0]);
 
@@ -20,15 +24,13 @@ public:
     watt_normal = power_normal;
   };
 
-
-  static float params[3];
-
   float* setpoint_to_aq(int setpoint) {
     //{main 0/1, n1, n2}
     
     params[0] = 0.0;
     params[1] = 0.0;
     params[2] = 0.0;
+
     current_setpoint = setpoint;
 
     if (setpoint <= 0) {
@@ -75,7 +77,18 @@ public:
     if (corsets[1] == -1) {params[2] = 0.0;};
 
     return params;
-  }
+  };
+
+  double pi_power(double error)
+    {
+      double proportional = error;
+      integral += error * dt;
+
+      double output = (kp * proportional) + (ki * integral);
+      return output;
+    }
+
+
 
 
 

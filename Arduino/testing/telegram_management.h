@@ -10,7 +10,7 @@ public:
     bool cpu_not_reachable;
     bool remoteNode_not_reachable;
     bool gateway_not_reachable;
-    bool general_reserve3;
+    bool level_station_not_reachable;
     bool general_reserve4;
     bool general_reserve5;
     bool general_reserve6;
@@ -19,7 +19,7 @@ public:
     bool rn_sd_not_reachable;
     bool rn_lora_ini_fail;
     bool rn_wlan_ini_fail;
-    bool rn_reserve3;
+    bool rn_lcd_fail;
     bool rn_reserve4;
     bool rn_reserve5;
 
@@ -41,7 +41,7 @@ public:
     bool cpu_valve1_error;
     bool cpu_valve2_error;
     bool cpu_com_to;
-    bool cpu_reserve9;
+    bool cpu_temp_to_low;
     bool cpu_reserve10;
     bool cpu_reserve11;
     bool cpu_reserve12;
@@ -58,7 +58,7 @@ public:
       cpu_not_reachable = (alarmVal >> 0) & 1;
       remoteNode_not_reachable = (alarmVal >> 1) & 1;
       gateway_not_reachable = (alarmVal >> 2) & 1;
-      general_reserve3 = (alarmVal >> 3) & 1;
+      level_station_not_reachable = (alarmVal >> 3) & 1;
       general_reserve4 = (alarmVal >> 4) & 1;
       general_reserve5 = (alarmVal >> 5) & 1;
       general_reserve6 = (alarmVal >> 6) & 1;
@@ -67,7 +67,7 @@ public:
       rn_sd_not_reachable = (alarmVal >> 7) & 1;
       rn_lora_ini_fail = (alarmVal >> 8) & 1;
       rn_wlan_ini_fail = (alarmVal >> 9) & 1;
-      rn_reserve3 = (alarmVal >> 10) & 1;
+      rn_lcd_fail = (alarmVal >> 10) & 1;
       rn_reserve4 = (alarmVal >> 11) & 1;
       rn_reserve5 = (alarmVal >> 12) & 1;
 
@@ -89,7 +89,7 @@ public:
       cpu_valve1_error = (alarmVal >> 25) & 1;
       cpu_valve2_error = (alarmVal >> 26) & 1;
       cpu_com_to = (alarmVal >> 27) & 1;
-      cpu_reserve9 = (alarmVal >> 28) & 1;
+      cpu_temp_to_low = (alarmVal >> 28) & 1;
       cpu_reserve10 = (alarmVal >> 29) & 1;
       cpu_reserve11 = (alarmVal >> 30) & 1;
     }
@@ -102,7 +102,7 @@ public:
       alarmVal |= ((long)cpu_not_reachable << 0);
       alarmVal |= ((long)remoteNode_not_reachable << 1);
       alarmVal |= ((long)gateway_not_reachable << 2);
-      alarmVal |= ((long)general_reserve3 << 3);
+      alarmVal |= ((long)level_station_not_reachable << 3);
       alarmVal |= ((long)general_reserve4 << 4);
       alarmVal |= ((long)general_reserve5 << 5);
       alarmVal |= ((long)general_reserve6 << 6);
@@ -111,7 +111,7 @@ public:
       alarmVal |= ((long)rn_sd_not_reachable << 7);
       alarmVal |= ((long)rn_lora_ini_fail << 8);
       alarmVal |= ((long)rn_wlan_ini_fail << 9);
-      alarmVal |= ((long)rn_reserve3 << 10);
+      alarmVal |= ((long)rn_lcd_fail << 10);
       alarmVal |= ((long)rn_reserve4 << 11);
       alarmVal |= ((long)rn_reserve5 << 12);
 
@@ -133,7 +133,7 @@ public:
       alarmVal |= ((long)cpu_valve1_error << 25);
       alarmVal |= ((long)cpu_valve2_error << 26);
       alarmVal |= ((long)cpu_com_to << 27);
-      alarmVal |= ((long)cpu_reserve9 << 28);
+      alarmVal |= ((long)cpu_temp_to_low << 28);
       alarmVal |= ((long)cpu_reserve10 << 29);
       alarmVal |= ((long)cpu_reserve11 << 30);
 
@@ -145,12 +145,13 @@ public:
     };
   };
 
-  const int MSG_LENGTH = 30;
+  const int MSG_LENGTH = 33;
   const int MAX_TIME_DRIFT = 30;
 
   int operating_mode;
   float power;
   float preassure;
+  int level;
   long unix_time{ 0 } ;
   Errors errors;
 
@@ -189,12 +190,13 @@ public:
   void dec_incoming_msg(const String &msg) {
 
     if (msg.length() == MSG_LENGTH) {
-      power = msg.substring(0, 5).toFloat();
-      preassure = msg.substring(5, 9).toFloat();
-      operating_mode = msg.substring(9, 10).toInt();
-      errors.alarm_msg = msg.substring(10, 20);
+      time_management(msg.substring(0, 10).toInt());
+      power = msg.substring(10, 15).toFloat();
+      preassure = msg.substring(15, 19).toFloat();
+      level = msg.substring(19, 22).toFloat();
+      operating_mode = msg.substring(22, 23).toInt();
+      errors.alarm_msg = msg.substring(23, 33);
       errors.fromAlarmString();
-      time_management(msg.substring(20, 30).toInt());
     } else {
       Serial.println("String length not ok");
     }
@@ -220,12 +222,13 @@ public:
 
     Serial.println(unix_time);
 
-    snprintf(buf, sizeof(buf), "%04.1f%03.1f%1d%-10s%-11d%",
+    snprintf(buf, sizeof(buf), "%-10d%04.1f%03.1f%3d%1d%-10s%",
+             getTime(),
              power,
              preassure,
+             level,
              operating_mode,
-             errors.alarm_msg.c_str(),
-             getTime());
+             errors.alarm_msg.c_str());
 
     return String(buf);
   }

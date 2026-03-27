@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+
+{% block title %}Status{% endblock %}
+
+{% block extra_style %}
+  .readings {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+
+  .card {
+    background: #f5f5f5;
+    border-radius: 6px;
+    padding: 10px 12px;
+  }
+
+  .card .n {
+    font-size: 26px;
+    font-weight: 500;
+  }
+
+  .card .u {
+    font-size: 11px;
+    color: #888;
+    margin-top: 2px;
+  }
+
+  .bar-wrap {
+    height: 3px;
+    background: #ddd;
+    border-radius: 2px;
+    margin-top: 8px;
+  }
+
+  .bar {
+    height: 3px;
+    border-radius: 2px;
+    background: #111;
+    width: 0%;
+    transition: width 0.4s;
+  }
+
+  .badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    border: 1px solid #ccc;
+    color: #666;
+    margin-bottom: 10px;
+  }
+
+  .msgs { margin-bottom: 0; }
+
+  .msg {
+    padding: 5px 0;
+    border-bottom: 1px solid #eee;
+    font-size: 13px;
+    color: #555;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .msg:last-child { border-bottom: none; }
+
+  @media (prefers-color-scheme: dark) {
+    .card      { background: #1e1e1e; }
+    .bar       { background: #eee; }
+    .bar-wrap  { background: #333; }
+    .badge     { border-color: #444; color: #aaa; }
+    .msg       { border-color: #2a2a2a; color: #aaa; }
+  }
+{% endblock %}
+
+{% block content %}
+  <a href="/hmi">Zur Steuerung</a>
+
+  <h2 style="margin-bottom:8px">Status</h2>
+  <span class="badge" id="s">—</span>
+
+  <div class="readings">
+    <div class="card">
+      <div style="font-size:11px;color:#888">Leistung</div>
+      <div class="n" id="pwr">—</div>
+      <div class="u">W</div>
+      <div class="bar-wrap"><div class="bar" id="pwrB"></div></div>
+    </div>
+    <div class="card">
+      <div style="font-size:11px;color:#888">Pegel</div>
+      <div class="n" id="level">—</div>
+      <div class="u">cm</div>
+      <div class="bar-wrap"><div class="bar" id="levelB"></div></div>
+    </div>
+  </div>
+
+  <h2 style="margin-bottom:8px">Log</h2>
+  <div class="msgs" id="msgs">
+    {% for _ in range(5) %}
+      <div class="msg">—</div>
+    {% endfor %}
+  </div>
+
+  <script>
+    async function poll() {
+      try {
+        const r = await fetch('/api');
+        if (!r.ok) return;
+        const d = await r.json();
+
+        document.getElementById('pwr').textContent  = d.power    ?? '—';
+        document.getElementById('level').textContent = d.level ?? '—';
+        document.getElementById('pwrB').style.width  = (d.power/34    ?? 0) + '%';
+        document.getElementById('levelB').style.width = (d.level/30 ?? 0) + '%';
+        document.getElementById('s').textContent    = d.statusShort || '—';
+
+        const el = document.getElementById('msgs');
+        el.innerHTML = '';
+        (d.statusMessages || []).forEach(m => {
+          const v = document.createElement('div');
+          v.className   = 'msg';
+          v.textContent = m || '—';
+          el.appendChild(v);
+        });
+      } catch(e) {}
+    }
+
+    setInterval(poll, 2000);
+    poll();
+  </script>
+{% endblock %}

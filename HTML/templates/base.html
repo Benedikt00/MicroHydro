@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>{% block title %}{% endblock %}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: monospace;
+      font-size: 14px;
+      color: #111;
+      background: #fff;
+      padding: 12px;
+      max-width: 480px;
+    }
+
+    a {
+      color: inherit;
+      font-size: 12px;
+      display: inline-block;
+      margin-bottom: 14px;
+      text-decoration: underline;
+    }
+
+    h2 {
+      font-size: 15px;
+      font-weight: 500;
+      margin-bottom: 10px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid #ddd;
+    }
+
+    button {
+      font-family: monospace;
+      font-size: 13px;
+      padding: 10px 6px;
+      border: 1px solid #ccc;
+      background: transparent;
+      color: inherit;
+      border-radius: 6px;
+      cursor: pointer;
+      width: 100%;
+      text-align: center;
+    }
+
+    button.on {
+      background: #111;
+      color: #fff;
+      border-color: #111;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      body       { background: #111; color: #eee; }
+      h2         { border-color: #2a2a2a; }
+      button     { border-color: #444; }
+      button.on  { background: #eee; color: #111; border-color: #eee; }
+      input[type=range] { accent-color: #eee; }
+    }
+
+    {% block extra_style %}{% endblock %}
+  </style>
+</head>
+<body>
+  {% block content %}{% endblock %}
+</body>
+</html>
