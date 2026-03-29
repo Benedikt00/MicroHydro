@@ -1,227 +1,401 @@
+#include <SD_management.h>
+#include <lcd_management.h>
+#include <lora.h>
+#include <nozzle_control.h>
+#include <telegram_management.h>
+#include <value_monitoring.h>
+#include <webserver.h>
+
 /*
- * =====================================================
- *  LoRa REMOTE NODE
- *  Board  : ESP32
- *  LoRa   : SX1278 (LoRa lib by Sandeep Mistry)
- *  Display: SSD1306 128x64 I2C (Adafruit SSD1306)
- *
- *  Same wiring as gateway:
- *    SX1278: SCK→18, MISO→19, MOSI→23, NSS→5, RST→14, DIO0→2
- *    SSD1306: SDA→21, SCL→22
- *
- *  Sends a packet every 30 seconds.
- *  Waits up to 3 s for an ACK from the gateway.
- *  Both RSSI values (node-side RX and gateway-side RX) shown on OLED.
- *
- *  Libraries needed:
- *    - LoRa  by Sandeep Mistry
- *    - Adafruit SSD1306
- *    - Adafruit GFX Library
- * =====================================================
- */
-
-#include <SPI.h>
-#include <LoRa.h>
-#include <Wire.h>
-#include <Adafruit_GFX.h>
-
-#include <WiFi.h>
-#include <WebServer.h>
-
-// ── WiFi credentials ──────────────────────────────────
-const char* SSID     = "MicroHydroRemoteNode";
-const char* PASSWORD = "Einstein123";
-
-WebServer        server(80);
-
-// ── Node identity ─────────────────────────────────────
-#define NODE_ID  "NODE1"
-
-// ── LoRa pins & frequency ─────────────────────────────
-#define LORA_SS    5
-#define LORA_RST   14
-#define LORA_DIO0  2
-#define LORA_FREQ  868E6    // Must match gateway
+ *   LLCC68 Pin  →  Arduino Pin
+ *   ─────────────────────────
+ *   VCC         →  3.3V
+ *   GND         →  GND
+ *   SCK         →  18 (SPI CLK)
+ *   MISO        →  19 (SPI MISO)
+ *   MOSI        →  23 (SPI MOSI)
+ *   NSS/CS      →  10
+ *   RESET       →  17
+ *   BUSY        →  4
+ *   DIO1        →  0
+ *   ANT_SW      →  6  (optional, some boards need this for TX/RX switching)
+*/
 
 
-// ── IO ────────────────────────────────────────────────
-#define LED_PIN    2        // Built-in LED on most ESP32 boards
+float test_mon = 0.5;
 
-// ── Timing ────────────────────────────────────────────
-#define TX_INTERVAL_MS  30000UL   // 30 seconds
-#define ACK_TIMEOUT_MS   3000UL   // Wait 3 s for ACK
+String incomeing = "123.456.7100000000001773778573";
 
-// ── State ─────────────────────────────────────────────
-long   packetNum      = 0;
-int    txRSSI         = 0;    // RSSI of last received packet (ACK) at this node
-float  txSNR          = 0.0;
-int    gwRSSI         = 0;    // RSSI reported by gateway in ACK
+//monitor_window test_value(0.0, 5.0, 0.05, 3000);
+int valok;
 
-String lastCmd        = "";
-unsigned long lastTx  = 0;
+nz_controller nz_con(2.4, 200.0);
 
+float* nozzels;
 
-// ═════════════════════════════════════════════════════
-//  Send packet + wait for ACK
-// ═════════════════════════════════════════════════════
-void sendPacket() {
-  packetNum++;
+int led_onboard = 2;
+long led_blink_time;
+bool led_State = LOW;
 
-  // Simple payload: ID, packet number, LED state
-  String payload = String(NODE_ID) + "," +
-                   String(packetNum) + "," +
-                   "LED:" + (ledState ? "1" : "0");
+const int LORA_SS = 5;
+const int LORA_DIO1 = 0;
+const int LORA_RESET = 17;
+const int LORA_BUSY = 4;
+const int LORA_POWER = 22;
 
-  Serial.println("[TX] " + payload);
-  LoRa.beginPacket();
-  LoRa.print(payload);
-  LoRa.endPacket();
+const int LORA_GATEWAY_ID = 3;
+const int LORA_REMOTE_ID = 2;
+const int thisLORA_ID = LORA_REMOTE_ID;
 
-  
-  unsigned long t = millis();
-  lastAckOk = false;
-  while (millis() - t < ACK_TIMEOUT_MS) {
-    int sz = LoRa.parsePacket();
-    if (sz > 0) {
-      String reply = "";
-      while (LoRa.available()) reply += (char)LoRa.read();
-      reply.trim();
-      txRSSI = LoRa.packetRssi();
-      txSNR  = LoRa.packetSnr();
-      Serial.println("[RX] " + reply + "  RSSI=" + String(txRSSI));
+const int SD_SS = 32;
 
-      // Parse gateway RSSI from "ACK:GW_RSSI:-75"
-      if (reply.startsWith("ACK:GW_RSSI:")) {
-        gwRSSI    = reply.substring(12).toInt();
-        lastAckOk = true;
-      }
-      // Also handle command piggyback "ACK:GW_RSSI:-75:CMD:LED:ON"
-      // (optional extension — gateway can append :CMD:xxx to its ACK)
-      int cmdIdx = reply.indexOf(":CMD:");
-      if (cmdIdx >= 0) {
-        lastCmd = reply.substring(cmdIdx + 5);
-        handleCommand(lastCmd);
-      }
-      break;
-    }
-  }
+const int LORA_MESSAGE_RETRYS = 3;
+int retries_used = 0;
 
-  if (!lastAckOk) Serial.println("[WARN] No ACK received");
-  
-}
+// ── Access Point config ───────────────────────────────────────────────────────
+//  SSID must be ≤ 31 chars. Password must be ≥ 8 chars, or "" for open network.
+const char* AP_SSID = "MicroHydro2";
+const char* AP_PASS = "Einstein123";  // set "" for an open (no password) AP
+const uint8_t AP_CHANNEL = 6;         // WiFi channel 1–13
+const uint8_t AP_HIDDEN = 0;          // 0 = broadcast SSID, 1 = hidden
+const uint8_t AP_MAX_CON = 4;         // max simultaneous clients
 
-// ═════════════════════════════════════════════════════
-//  Handle command from gateway (received inside ACK)
-// ═════════════════════════════════════════════════════
-void handleCommand(String cmd) {
-  cmd.trim();
-  Serial.println("[CMD] " + cmd);
-  lastCmd = cmd
-  if (cmd == "LED:ON") {
-    ledState = true;
-    digitalWrite(LED_PIN, HIGH);
-  } else if (cmd == "LED:OFF") {
-    ledState = false;
-    digitalWrite(LED_PIN, LOW);
-  } else if (cmd == "PING") {
-    // Just acknowledge — next packet will include response
-  }
-}
+// The ESP32 AP always uses 192.168.4.1 as its gateway/IP by default.
+// You can override this with WiFi.softAPConfig() below if needed.
+static const IPAddress AP_IP(192, 168, 4, 2);
+static const uint16_t AP_PORT = 80;
 
-// ═════════════════════════════════════════════════════
-//  Web handlers
-// ═════════════════════════════════════════════════════
-void handleRoot() {
-  String h = "<!DOCTYPE html><html><head><meta charset='UTF-8'>"
-             "<meta http-equiv='refresh' content='5'>"
-             "<title>LoRa Gateway</title></head><body>"
-             "<h2>LoRa Gateway</h2>"
-             "<p>Packets received: " + String(packetNum) + "</p>"
-             "<p>Last RSSI: "        + String(txRSSI) + " dBm</p>"
-             "<p>Last SNR: "         + String(txSNR, 1) + " dB</p>"
-             "<p>Last message: <code>" + String(lastCmd) + "</code></p>"
-             "<hr>"
-             "<h3>Send command to node</h3>"
-             "<form action='/send' method='get'>"
-             "<input name='cmd' value='" + String(lastCmd) + "' size='30'>"
-             "<input type='submit' value='Send'>"
-             "</form>"
-            
-             "<hr><h3>Last Tyg</h3><pre>" + String(lastTx) + "</pre>"
-             "</body></html>";
-  server.send(200, "text/html", h);
-}
+WebserverAbstraction* ws = nullptr;
 
-// ═════════════════════════════════════════════════════
-//  SETUP
-// ═════════════════════════════════════════════════════
+//INIT COMS
+LoRaCom lora_module(LORA_SS, LORA_DIO1, LORA_RESET, LORA_BUSY);
+
+telegram_management tel;
+
+float measuredPower = 0.0f;
+int measuredLevel = 0;
+uint32_t deviceEpoch = 0;
+unsigned long lastRtcUpdate = 0;
+
+bool lora_startup_error;
+
+enum SenderState { SEND,
+                   RECIEVING,
+                   ERROR };
+
+SenderState senderState = RECIEVING;
+
+unsigned long lastSendTime = 0;
+int packetCounter = 0;
+
+unsigned long ackSendTime = 0;
+static bool waitingToAck = false;
+static bool waitingForAck = false;
+String pendingMsg = "";
+
+int message_sender_time = 20000;
+int LORA_WAIT_TO_ACK_TIMEOUT = 400;
+int LORA_WAIT_FOR_ACK = 5000;
+int LORA_AFTER_SEND_TIMEOUT = 200;
+int last_msg;
+
+bool lora_set_recieving = true;
+
 void setup() {
-  Serial.begin(115200);
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
-
-
-  // LoRa
-  SPI.begin(18, 19, 23, LORA_SS);
-  LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
-  if (!LoRa.begin(LORA_FREQ)) {
-    Serial.println("[ERROR] LoRa init failed");
-    
-    while (true) delay(1000);
-  }
-  LoRa.setSpreadingFactor(7);
-  LoRa.setSignalBandwidth(125E3);
-  LoRa.setTxPower(14);
-  Serial.println("[OK] LoRa ready");
   delay(1000);
 
-  // Send first packet immediately
-  sendPacket();
-  lastTx = millis();
+  pinMode(led_onboard, OUTPUT);
+  Serial.begin(115200);
 
-  WiFi.begin(SSID, PASSWORD);
-  int t = 0;
-  while (WiFi.status() != WL_CONNECTED && t++ < 40) delay(500);
+  digitalWrite(led_onboard, HIGH);
 
-  if (WiFi.status() == WL_CONNECTED) {
-    String ip = WiFi.localIP().toString();
-    Serial.println("[WiFi] " + ip);
-  } else {
-    Serial.println("[WiFi] FAILED");
+  while (!Serial && millis() < 3000) {}
+
+  Serial.println("Begin");
+  lora_module.init();
+  tel.errors.gw_lora_fail = lora_module.loraError;
+  if (!lora_module.loraError) {
+    lora_module.beginReceive();
   }
+  WIFI_init();
+  tel.out_reciever_id = LORA_GATEWAY_ID;
 
-  server.on("/",     handleRoot);
-  server.begin();
+  //SD_management sd(SD_SS);
+  //  lcd_management ld;
+  /*
+    ld.power = 254.2;
+    ld.status = "Testing";
+    ld.update();
+
+    tel.dec_incoming_msg(incomeing);
+
+    Serial.print(String(tel.operating_mode));
+    Serial.print(String(tel.power));
+    Serial.println(String(tel.preassure));
+    tel.errors.cpu_preassure_error = true;
+    tel.errors.cpu_voltage_error = true;
+
+    sd.write_telegram(incomeing);
+
+    Serial.println(tel.enc_outgoing_msg());*/
+
+  //test_value.set_target(4.0);
+  /*for (int i = -2; i < 12; i++) {
+    nozzels = nz_con.setpoint_to_aq(i);
+    Serial.println(String(i) + " " + String(nozzels[0]) + " " + String(nozzels[1]) + " " + String(nozzels[2]));
+  };*/
+};
+
+void loop() {
+  loracom();
+  //lrsender();
+  WIFI_loop();
+
+  digitalWrite(led_onboard, led_State);
+
+  if (millis() - led_blink_time > 3000) {
+    led_blink_time = millis();
+    led_State = !led_State;
+  }
+};
+
+
+void ackErrors() {
+  tel.errors.gw_lora_fail = false;
+  tel.errors.remoteNode_not_reachable = false;
+  tel.errors.gw_lcd_fail = false;
+  tel.errors.gw_wlan_ini_fail = false;
+  tel.ack_out = 1;
+  senderState = SEND;
+  Serial.println("ACK ERRORS");
+};
+
+String payload;
+char buf[STATUS_MSG_LEN];
+
+void loracom() {
+  switch (senderState) {
+    case RECIEVING:
+      {
+        String msg = lora_module.receive();
+        if (tel.errors.gw_lora_fail || tel.errors.remoteNode_not_reachable) {
+          senderState = ERROR;
+          break;
+        }
+
+        if (millis() - lastSendTime < LORA_AFTER_SEND_TIMEOUT) {
+          break;
+        } 
+
+        if (waitingToAck && (millis() - ackSendTime >= LORA_WAIT_TO_ACK_TIMEOUT)) {
+          Serial.println("Acknowledging, set state send");
+          senderState = SEND;
+          break;
+        }
+
+                  
+        if (msg == "ACK") {
+          Serial.println("ACK received! ");
+          snprintf(buf, sizeof(buf), "Received: %s  RSSI: %.1f dBm", msg, lora_module.radio.getRSSI());
+          ws->pushStatusMessage(buf);
+
+          snprintf(buf, sizeof(buf), "SNR: %.1f", lora_module.radio.getSNR());
+          ws->pushStatusMessage(buf);
+
+          waitingForAck = false;
+          break;
+        } else if (waitingForAck && (millis() - lastSendTime > LORA_WAIT_FOR_ACK)) {
+          Serial.println("ACK timeout, retrying... " + String(retries_used));
+          snprintf(buf, sizeof(buf), "ACK timeout, retrying... %1d", retries_used);
+          ws->pushStatusMessage(buf);
+          //Telegram repetition when not acknowledged
+          if (retries_used < LORA_MESSAGE_RETRYS) {
+            senderState = SEND;
+            retries_used += 1;
+
+          } else {  //errors when retrys exceeded
+            retries_used = 0;
+            senderState = ERROR;
+
+            Serial.println("Lora Max retries exceedet");
+            tel.errors.remoteNode_not_reachable = true;
+            snprintf(buf, sizeof(buf), "Lora Max retries exceedet");
+            ws->pushStatusMessage(buf);
+          }
+        }
+        if (msg != "") {  //new msg
+          Serial.println("New msg " + String(msg.length()));
+
+          if (msg.length() == tel.MSG_LENGTH) {  //right len
+            Serial.println("Right len, for node " + msg.substring(tel.DEVICE_ID_SPOT, tel.DEVICE_ID_SPOT + 1));
+            if (msg.substring(tel.DEVICE_ID_SPOT, tel.DEVICE_ID_SPOT + 1).toInt() == thisLORA_ID) {  //for this node
+              tel.dec_incoming_msg(msg);
+              lastSendTime = millis();
+              Serial.println("MSG recieved " + msg);
+              char buf[STATUS_MSG_LEN];
+
+              snprintf(buf, sizeof(buf), "Received: %s  RSSI: %d dBm", msg, lora_module.radio.getRSSI());
+              ws->pushStatusMessage(buf);
+
+              snprintf(buf, sizeof(buf), "SNR: %.1f", lora_module.radio.getSNR());
+              ws->pushStatusMessage(buf);
+              waitingToAck = true;
+              lora_set_recieving = true;
+            }
+          }
+        }
+        break;
+      }
+
+    case SEND:
+      {
+        if (tel.errors.gw_lora_fail || tel.errors.remoteNode_not_reachable) {
+          senderState = ERROR;
+          break;
+        }
+        if (waitingToAck && (millis() - ackSendTime >= 100)) {
+          payload = "ACK";
+          waitingToAck = false;
+        } else {
+          payload = tel.enc_outgoing_msg();
+          waitingForAck = true;
+          Serial.println("Waiting for ack");
+        }
+        lora_module.transmit(payload);
+
+        if (lora_module.loraError) {
+          tel.errors.gw_lora_fail = true;
+          Serial.println("Set Gateway Error");
+          senderState = ERROR;
+          break;
+        }
+        tel.errors.gw_lora_fail = false;
+
+        // Switch to receive mode to listen for ACK
+
+        lastSendTime = millis();
+        lora_module.beginReceive();
+        senderState = RECIEVING;
+        break;
+      }
+
+    case ERROR:
+      {
+        if (!tel.errors.gw_lora_fail && !tel.errors.remoteNode_not_reachable) {
+          lora_module.init();
+          if (!lora_module.loraError) {
+            tel.errors.remoteNode_not_reachable = false;
+            Serial.println("Set Send from Error");
+
+            senderState = SEND;
+          }
+        }
+        break;
+      }
+  }
 }
 
-// ═════════════════════════════════════════════════════
-//  LOOP
-// ═════════════════════════════════════════════════════
-void loop() {
-  // Send every 30 seconds
-  if (millis() - lastTx >= TX_INTERVAL_MS) {
-    sendPacket();
-    lastTx = millis();
+void WIFI_init() {
+  // ── Start Access Point ────────────────────────────────────────────────
+  WiFi.mode(WIFI_AP);
+
+  // Optional: fix the AP IP / gateway / subnet (defaults are fine for most use)
+  // IPAddress gateway(192, 168, 4, 1);
+  // IPAddress subnet (255, 255, 255, 0);
+  // WiFi.softAPConfig(AP_IP, gateway, subnet);
+
+  bool ok = WiFi.softAP(AP_SSID, AP_PASS, AP_CHANNEL, AP_HIDDEN, AP_MAX_CON);
+
+  if (!ok) {
+    Serial.println("[AP] softAP() failed — halting.");
+    while (1) { delay(1000); }
   }
 
-  server.handleClient();
+  IPAddress ip = WiFi.softAPIP();  // typically 192.168.4.1
+  Serial.println("[AP] Network : " + String(AP_SSID));
+  if (strlen(AP_PASS) > 0)
+    Serial.println("[AP] Password: " + String(AP_PASS));
+  else
+    Serial.println("[AP] Password: (open network)");
+  Serial.println("[AP] IP      : " + ip.toString());
 
-  // Also listen for unsolicited commands between transmissions
-  int sz = LoRa.parsePacket();
-  if (sz > 0) {
-    String msg = "";
-    while (LoRa.available()) msg += (char)LoRa.read();
-    msg.trim();
-    Serial.println("[RX mid-cycle] " + msg);
-    // If it's a plain command (not an ACK), handle it
-    if (!msg.startsWith("ACK:")) {
-      handleCommand(msg);
-      // Send a quick ACK reply
-      delay(100);
-      LoRa.beginPacket();
-      LoRa.print(String(NODE_ID) + ":ACK:" + msg);
-      LoRa.endPacket();
-    }
-    
+  // ── Instantiate webserver ─────────────────────────────────────────────
+  ws = new WebserverAbstraction(ip, AP_PORT);
+
+  ws->setStatusMessage(0, "ESP32 AP started");
+  ws->setStatusMessage(1, ("SSID: " + String(AP_SSID)).c_str());
+  ws->setStatusMessage(2, ("IP:   " + ip.toString()).c_str());
+  ws->setStatusMessage(3, "Waiting for commands");
+  ws->setStatusMessage(4, "");
+  ws->setStatusShort("IDLE");
+
+  Serial.println("[WS] Dashboard: http://" + ip.toString() + ":" + String(AP_PORT));
+}
+
+void WIFI_loop() {
+  ws->update();
+
+  // ── Time sync ─────────────────────────────────────────────────────────
+  if (ws->hasNewClientTime()) {
+    tel.time_management(ws->getClientEpoch());
+  }
+
+  // ── Control logic ─────────────────────────────────────────────────────
+  ControlMode mode = ws->getMode();
+  float pwrSP = ws->getPowerSetpoint();
+  int lvlSP = ws->getLevelSetpoint();
+
+  switch (mode) {
+    case ControlMode::UNKNOWN:
+      measuredPower = 0.0;
+      measuredLevel = 0;
+      ws->setStatusShort("Unbekannt");
+      ws->setStatusShortSetpoint("Unbekannt");
+      break;
+    case ControlMode::STOP:
+      measuredPower = 0.0;
+      measuredLevel = 0;
+      ws->setStatusShort("HALT");
+      ws->setStatusShortSetpoint("HALT");
+      break;
+    case ControlMode::CONSTANT_POWER:
+      measuredPower = pwrSP;  // replace with real sensor read
+      measuredLevel = 2;      // replace with real sensor read
+      ws->setStatusShort("Leistung");
+      ws->setStatusShortSetpoint("Leistung");
+      break;
+    case ControlMode::CONSTANT_LEVEL:
+      measuredPower = 45.0;   // replace with real sensor read
+      measuredLevel = lvlSP;  // replace with real sensor read
+      ws->setStatusShort("Pegel");
+      ws->setStatusShortSetpoint("Pegel");
+      break;
+    case ControlMode::CONSTANT_POWER_NIGHT:
+      measuredPower = pwrSP;  // replace with real sensor read
+      measuredLevel = 2;      // replace with real sensor read
+      ws->setStatusShort("Leistung N");
+      ws->setStatusShortSetpoint("Leistung N");
+      break;
+    case ControlMode::CONSTANT_LEVEL_NIGHT:
+      measuredPower = 45.0;   // replace with real sensor read
+      measuredLevel = lvlSP;  // replace with real sensor read
+      ws->setStatusShort("Pegel N");
+      ws->setStatusShortSetpoint("Pegel N");
+      break;
+    case ControlMode::FILLING:
+      measuredPower = 0.0;  // replace with real sensor read
+      measuredLevel = 0;    // replace with real sensor read
+      ws->setStatusShort("Speicher");
+      ws->setStatusShortSetpoint("Speicher");
+      break;
+  }
+
+  ws->setPower(measuredPower);
+  ws->setLevel(measuredLevel);
+
+  // ── Periodic log ──────────────────────────────────────────────────────
+  if (ws->getAckErrors()) {
+    ws->resetAck();
+    ackErrors();
   }
 }

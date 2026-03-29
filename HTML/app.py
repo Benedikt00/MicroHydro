@@ -15,13 +15,16 @@ state = {
         "",
     ],
     "power":       42,
-    "pressure":    67,
+    "level":    67,
+    "mode":              0,   # 1=Stop 2=Leistung 3=Druck 4=Leistung(N) 5=Druck(N) 6=Speicher
+
     "statusShort": "LEISTUNG",
+    "statusShortSetpoint": "LEISTUNG",
 
     # Outputs (UI → device)
-    "mode":              2,   # 1=Stop 2=Leistung 3=Druck 4=Leistung(N) 5=Druck(N) 6=Speicher
+    "modeSetpoint" : 0,
     "powerSetpoint":     60,
-    "pressureSetpoint":  0,
+    "levelSetpoint":  0,
     "clientEpoch":       0,
 }
 
@@ -35,7 +38,7 @@ def simulate():
         time.sleep(2)
         uptime += 2
         with lock:
-            m   = state["mode"]
+            m   = state["modeSetpoint"]
             psp = state["powerSetpoint"]
             rsp = state["levelSetpoint"]
 
@@ -44,26 +47,37 @@ def simulate():
                 state["level"]    =     random.randint(3, 340)
 
                 state["statusShort"] = "STOP"
+                state["statusShortSetpoint"] = "STOP"
             elif m == 2:  # Leistungsregelung
                 state["power"]       = random.randint(40, 340)
                 state["level"]    =     random.randint(3, 340)
                 state["statusShort"] = "LEISTUNG"
+                state["statusShortSetpoint"] = "LEISTUNG"
+
             elif m == 3:  # Druckregelung
                 state["power"]       = random.randint(40, 340)
                 state["level"]    =     random.randint(3, 340)
-                state["statusShort"] = "DRUCK"
+                state["statusShort"] = "PEGEL"
+                state["statusShortSetpoint"] = "PEGEL"
+
             elif m == 4:  # Leistungsregelung Nacht
                 state["power"]       = random.randint(40, 340)
                 state["level"]    =     random.randint(3, 340)
                 state["statusShort"] = "LEISTUNG-N"
+                state["statusShortSetpoint"] = "LEISTUNG-N"
+
             elif m == 5:  # Druckregelung Nacht
                 state["power"]       = random.randint(40, 340)
                 state["level"]    =     random.randint(3, 340)
-                state["statusShort"] = "DRUCK-N"
+                state["statusShort"] = "PEGEL-N"
+                state["statusShortSetpoint"] = "PEGEL-N"
+
             elif m == 6:  # Speicherbetrieb
                 state["power"]       = random.randint(40, 340)
                 state["level"]    =     random.randint(3, 340)
                 state["statusShort"] = "SPEICHER"
+                state["statusShortSetpoint"] = "SPEICHER"
+
 
             # Shift a new log line in every 10 s
             if uptime % 10 == 0:
@@ -94,13 +108,16 @@ def api_get():
 @app.route("/api", methods=["POST"])
 def api_post():
     body = request.get_json(silent=True) or {}
+    print(body)
     with lock:
         if "mode" in body:
+            state["modeSetpoint"] = int(body["mode"])
             state["mode"] = int(body["mode"])
         if "powerSetpoint" in body:
             state["powerSetpoint"] = max(0, min(340, int(body["powerSetpoint"])))
         if "levelSetpoint" in body:
             state["levelSetpoint"] = max(0, min(300, int(body["levelSetpoint"])))
+        print(state)
         return jsonify(dict(state))
 
 @app.route("/api/time", methods=["POST"])

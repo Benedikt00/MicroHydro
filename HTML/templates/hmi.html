@@ -62,9 +62,9 @@
     {% set modes = [
       (1, 'Stop'),
       (2, 'Leistungsregelung'),
-      (3, 'Druckregelung'),
+      (3, 'Pegelregelung'),
       (4, 'Leistungsregelung (Nacht)'),
-      (5, 'Druckregelung (Nacht)'),
+      (5, 'Pegelregelung (Nacht)'),
       (6, 'Speicherbetrieb'),
     ] %}
     {% for num, label in modes %}
@@ -73,7 +73,7 @@
   </div>
 
   <div class="sp" id="sp">
-    <div class="sp-top" id="spLbl">Sollwert <span id="spV">0</span>%</div>
+    <div class="sp-top" id="spLbl">Sollwert <span id="spV">0</span><span id="spUnit"></span></div>
     <input type="range" id="sl" min="0" max="340" value="0" step="1"
       oninput="document.getElementById('spV').textContent = this.value"
       onchange="send()"/>
@@ -83,26 +83,66 @@
   <button class="tbtn" onclick="syncTime()">Zeit synchronisieren</button>
   <div class="tinfo" id="ti">nicht synchronisiert</div>
 
+  <button class="tbtn" onclick="errorAck()">Ack Errors</button>
+
   <script>
     const POWER_MODES  = new Set([2, 4]);
     const LEVEL_MODES  = new Set([3, 5]);
     const SLIDER_MODES = new Set([2, 3, 4, 5]);
     let mode = 0;
 
-    function setMode(m) {
+    function applySliderConfig(m, serverData) {
+      const sp   = document.getElementById('sp');
+      const lb   = document.getElementById('spLbl');
+      const sl   = document.getElementById('sl');
+      const unit = document.getElementById('spUnit');
+
+      if (!SLIDER_MODES.has(m)) {
+        sp.classList.remove('show');
+        return;
+      }
+
+      sp.classList.add('show');
+      if (POWER_MODES.has(m)) {
+        lb.childNodes[0].textContent = 'Leistung Sollwert ';
+        unit.textContent = ' W';
+        sl.max = '340';
+        sl.value = Math.min(serverData?.powerSetpoint ?? 0, 340);
+      } else {
+        lb.childNodes[0].textContent = 'Pegel Sollwert ';
+        unit.textContent = ' cm';
+        sl.max = '300';
+        sl.value = Math.min(serverData?.levelSetpoint ?? 0, 300);
+      }
+      document.getElementById('spV').textContent = sl.value;
+    }
+
+    ackErrors = 0;
+
+    function errorAck(){
+      ackErrors = 1;
+      send();
+    }
+
+    async function setMode(m) {
       mode = m;
       for (let i = 1; i <= 6; i++)
         document.getElementById('b' + i).className = (i === m) ? 'on' : '';
 
-      const sp = document.getElementById('sp');
-      const lb = document.getElementById('spLbl');
-      if (!SLIDER_MODES.has(m)) {
-        sp.classList.remove('show');
+      if (SLIDER_MODES.has(m)) {
+        // fetch current setpoints before configuring the slider
+        try {
+          const r = await fetch('/api');
+          const d = r.ok ? await r.json() : {};
+          applySliderConfig(m, d);
+        } catch(e) {
+          applySliderConfig(m, {});
+        }
       } else {
-        sp.classList.add('show');
-        lb.childNodes[0].textContent =
-          POWER_MODES.has(m) ? 'Leistung Sollwert ' : 'Pegel Sollwert ';
+        applySliderConfig(m, {});
       }
+
+      // send the mode change, but preserve the setpoint already on the slider
       send();
     }
 
@@ -114,11 +154,13 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             mode,
-            powerSetpoint:    POWER_MODES.has(mode) ? sp : 0,
-            levelSetpoint: LEVEL_MODES.has(mode)  ? sp : 0,
+            ...(POWER_MODES.has(mode) && { powerSetpoint: sp }),
+            ...(LEVEL_MODES.has(mode) && { levelSetpoint: sp }),
+            ackErrors, 
           }),
         });
       } catch(e) {}
+      ackErrors = 0
     }
 
     async function syncTime() {
@@ -141,16 +183,12 @@
         const d = await r.json();
         if (document.activeElement.id !== 'sl') {
           const m = d.mode ?? 1;
-          if (m !== mode) setMode(m);
-          const sp = POWER_MODES.has(m) ? (d.powerSetpoint    ?? 0)
-                   : LEVEL_MODES.has(m)  ? (d.levelSetpoint ?? 0) : 0;
-          document.getElementById('sl').value       = sp;
-          document.getElementById('spV').textContent = sp;
+          if (m !== mode) await setMode(m);
+          else applySliderConfig(m, d);
         }
       } catch(e) {}
     }
 
-    setInterval(poll, 2000);
-    poll();
+
   </script>
 {% endblock %}

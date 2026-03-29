@@ -1,6 +1,6 @@
 <mxfile host="app.diagrams.net" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36" version="29.6.6">
   <diagram name="Page-1" id="bfe91b75-5d2c-26a0-9c1d-138518896778">
-    <mxGraphModel dx="1747" dy="390" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="850" background="none" math="0" shadow="0">
+    <mxGraphModel dx="2778" dy="986" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="850" background="none" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
@@ -391,7 +391,7 @@
           <mxGeometry height="30" width="60" x="-341" y="970" as="geometry" />
         </mxCell>
         <mxCell id="rYZ8RN9RpD2qeJyVwiWs-28" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="Brietasauswahldrehschalter&lt;div&gt;0...Aus&lt;/div&gt;&lt;div&gt;1...Pegelgeregel&lt;/div&gt;&lt;div&gt;2...Auto Zeit&lt;/div&gt;&lt;div&gt;3...Fern HMI&lt;/div&gt;" vertex="1">
-          <mxGeometry height="30" width="60" x="-530" y="991" as="geometry" />
+          <mxGeometry height="79" width="60" x="-515" y="971" as="geometry" />
         </mxCell>
         <mxCell id="rYZ8RN9RpD2qeJyVwiWs-30" parent="1" style="whiteSpace=wrap;html=1;" value="LS-FI" vertex="1">
           <mxGeometry height="60" width="120" x="1072.1399999999999" y="520" as="geometry" />

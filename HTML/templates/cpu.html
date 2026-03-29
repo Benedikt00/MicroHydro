@@ -66,6 +66,20 @@
 
   .msg:last-child { border-bottom: none; }
 
+  #modes_div{
+    display: flex;
+        flex-direction: row;
+    flex-wrap: nowrap;
+    align-content: center;
+    justify-content: space-around;
+  }
+
+  #modes_div div{
+    display: flex;
+
+
+  }
+
   @media (prefers-color-scheme: dark) {
     .card      { background: #1e1e1e; }
     .bar       { background: #eee; }
@@ -78,19 +92,24 @@
 {% block content %}
   <a href="/hmi">Zur Steuerung</a>
 
-  <h2 style="margin-bottom:8px">Status</h2>
-  <span class="badge" id="s">—</span>
+  <h2 style="margin-bottom:8px">Status</h2><div id="modes_div">
+  <div><p>CPU wert:</p><span class="badge" id="s">—</span></div>
+  <div></div><p>Steuerwert:</p><span class="badge" id="t">—</span></div></div>
 
   <div class="readings">
     <div class="card">
-      <div style="font-size:11px;color:#888">Leistung</div>
+      <div style="font-size:11px;color:#888">Leistung Aktuell:</div>
       <div class="n" id="pwr">—</div>
+      <div style="font-size:11px;color:#636363">Leistung Setpoint:</div>
+      <div class="a" id="pwrSP">—</div>
       <div class="u">W</div>
       <div class="bar-wrap"><div class="bar" id="pwrB"></div></div>
     </div>
     <div class="card">
-      <div style="font-size:11px;color:#888">Pegel</div>
+      <div style="font-size:11px;color:#888">Pegel Aktuell:</div>
       <div class="n" id="level">—</div>
+      <div style="font-size:11px;color:#888">Pegel Setpoint:</div>
+      <div class="a" id="levelSP">—</div>
       <div class="u">cm</div>
       <div class="bar-wrap"><div class="bar" id="levelB"></div></div>
     </div>
@@ -109,12 +128,15 @@
         const r = await fetch('/api');
         if (!r.ok) return;
         const d = await r.json();
-
+        console.log(d)
         document.getElementById('pwr').textContent  = d.power    ?? '—';
         document.getElementById('level').textContent = d.level ?? '—';
-        document.getElementById('pwrB').style.width  = (d.power/34    ?? 0) + '%';
-        document.getElementById('levelB').style.width = (d.level/30 ?? 0) + '%';
+        document.getElementById('pwrSP').textContent  = d.powerSetpoint    ?? '—';
+        document.getElementById('levelSP').textContent = d.levelSetpoint ?? '—';
+        document.getElementById('pwrB').style.width  = (d.power/3.4    ?? 0) + '%';
+        document.getElementById('levelB').style.width = (d.level/3 ?? 0) + '%';
         document.getElementById('s').textContent    = d.statusShort || '—';
+        document.getElementById('t').textContent    = d.statusShortSetpoint || '—';
 
         const el = document.getElementById('msgs');
         el.innerHTML = '';
