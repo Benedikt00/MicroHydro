@@ -43,7 +43,7 @@ const int LORA_POWER = 22;
 
 const int LORA_GATEWAY_ID = 3;
 const int LORA_REMOTE_ID = 2;
-const int thisLORA_ID = LORA_GATEWAY_ID;
+const int thisLORA_ID = LORA_REMOTE_ID;
 
 const int SD_SS = 32;
 
@@ -52,7 +52,7 @@ int retries_used = 0;
 
 // ── Access Point config ───────────────────────────────────────────────────────
 //  SSID must be ≤ 31 chars. Password must be ≥ 8 chars, or "" for open network.
-const char* AP_SSID = "MicroHydro";
+const char* AP_SSID = "MicroHydro2";
 const char* AP_PASS = "Einstein123";  // set "" for an open (no password) AP
 const uint8_t AP_CHANNEL = 6;         // WiFi channel 1–13
 const uint8_t AP_HIDDEN = 0;          // 0 = broadcast SSID, 1 = hidden
@@ -81,7 +81,7 @@ enum SenderState { SEND,
                    RECIEVING,
                    ERROR };
 
-SenderState senderState = SEND;
+SenderState senderState = RECIEVING;
 
 unsigned long lastSendTime = 0;
 unsigned long lastRecieveTime = 0;
@@ -95,10 +95,10 @@ static bool waitingForAck = false;
 String pendingMsg = "";
 
 int message_sender_time = 20000;
-int LORA_WAIT_TO_ACK_TIMEOUT = 400;
-int LORA_WAIT_FOR_ACK = 5000;
-int LORA_AFTER_SEND_TIMEOUT = 200;
-int LORA_REPLY_TIME = 500;
+long LORA_WAIT_TO_ACK_TIMEOUT = 400;
+long LORA_WAIT_FOR_ACK = 5000;
+long LORA_AFTER_SEND_TIMEOUT = 200;
+long LORA_REPLY_TIME = 500;
 
 bool lora_set_recieving = true;
 bool lora_send_reply = false;
@@ -162,11 +162,11 @@ void loop() {
     led_blink_time = millis();
     led_State = !led_State;
   }
-
+/*
   if (millis() - last_msg > message_sender_time) {
     last_msg = millis();
     senderState = SEND;
-  }
+  }*/
 };
 
 void ackErrors() {

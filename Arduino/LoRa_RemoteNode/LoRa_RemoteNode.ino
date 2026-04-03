@@ -5,7 +5,7 @@
 #include <telegram_management.h>
 #include <value_monitoring.h>
 #include <webserver.h>
-
+#include <http_client.h>
 /*
  *   LLCC68 Pin  →  Arduino Pin
  *   ─────────────────────────
@@ -52,20 +52,16 @@ const int SD_SS = 32;
 const int LORA_MESSAGE_RETRYS = 3;
 int retries_used = 0;
 
-// ── Access Point config ───────────────────────────────────────────────────────
-//  SSID must be ≤ 31 chars. Password must be ≥ 8 chars, or "" for open network.
-const char* AP_SSID = "MicroHydro2";
-const char* AP_PASS = "Einstein123";  // set "" for an open (no password) AP
-const uint8_t AP_CHANNEL = 6;         // WiFi channel 1–13
-const uint8_t AP_HIDDEN = 0;          // 0 = broadcast SSID, 1 = hidden
-const uint8_t AP_MAX_CON = 4;         // max simultaneous clients
+const int WIFI_RETRY_CONNECTION = 6000; //Retry connectiopn after disconnect
+const int WIFI_CON_MAX_TIME = 300; //maximum time to try to connect to wifi on startup, will be ramped up if not succsessful to ->
+const int WIFI_loop_request_timeoute = 300; //request time to cpu data
+unsigned long wifi_last_request; 
 
-// The ESP32 AP always uses 192.168.4.1 as its gateway/IP by default.
-// You can override this with WiFi.softAPConfig() below if needed.
-static const IPAddress AP_IP(192, 168, 4, 2);
-static const uint16_t AP_PORT = 80;
+// ── Access  config ───────────────────────────────────────────────────────
+const char* AP_SSID = "blackbird_2.0";
+const char* AP_PASS = "groomlake";  
 
-WebserverAbstraction* ws = nullptr;
+static const IPAddress AP_IP(192, 168, 0, 2);
 
 //INIT COMS
 LoRaCom lora_module(LORA_SS, LORA_DIO1, LORA_RESET, LORA_BUSY);
@@ -117,7 +113,12 @@ void setup() {
   if (!lora_module.loraError) {
     lora_module.beginReceive();
   }
-  WIFI_init();
+
+  http_client WlanCom(AP_SSID, AP_PASS);
+  if (WlanCon.connectWiFi(WIFI_CON_MAX_TIME)){
+    Serial.println("Yay");
+  }
+
   tel.out_reciever_id = LORA_GATEWAY_ID;
 
   //SD_management sd(SD_SS);
@@ -149,7 +150,7 @@ void setup() {
 void loop() {
   loracom();
   //lrsender();
-  WIFI_loop();
+  
 
   digitalWrite(led_onboard, led_State);
 
@@ -295,107 +296,26 @@ void loracom() {
   }
 }
 
-void WIFI_init() {
-  // ── Start Access Point ────────────────────────────────────────────────
-  WiFi.mode(WIFI_AP);
-
-  // Optional: fix the AP IP / gateway / subnet (defaults are fine for most use)
-  // IPAddress gateway(192, 168, 4, 1);
-  // IPAddress subnet (255, 255, 255, 0);
-  // WiFi.softAPConfig(AP_IP, gateway, subnet);
-
-  bool ok = WiFi.softAP(AP_SSID, AP_PASS, AP_CHANNEL, AP_HIDDEN, AP_MAX_CON);
-
-  if (!ok) {
-    Serial.println("[AP] softAP() failed — halting.");
-    while (1) { delay(1000); }
-  }
-
-  IPAddress ip = WiFi.softAPIP();  // typically 192.168.4.1
-  Serial.println("[AP] Network : " + String(AP_SSID));
-  if (strlen(AP_PASS) > 0)
-    Serial.println("[AP] Password: " + String(AP_PASS));
-  else
-    Serial.println("[AP] Password: (open network)");
-  Serial.println("[AP] IP      : " + ip.toString());
-
-  // ── Instantiate webserver ─────────────────────────────────────────────
-  ws = new WebserverAbstraction(ip, AP_PORT);
-
-  ws->setStatusMessage(0, "ESP32 AP started");
-  ws->setStatusMessage(1, ("SSID: " + String(AP_SSID)).c_str());
-  ws->setStatusMessage(2, ("IP:   " + ip.toString()).c_str());
-  ws->setStatusMessage(3, "Waiting for commands");
-  ws->setStatusMessage(4, "");
-  ws->setStatusShort("IDLE");
-
-  Serial.println("[WS] Dashboard: http://" + ip.toString() + ":" + String(AP_PORT));
-}
 
 void WIFI_loop() {
-  ws->update();
-
-  // ── Time sync ─────────────────────────────────────────────────────────
-  if (ws->hasNewClientTime()) {
-    tel.time_management(ws->getClientEpoch());
+  
+  if (!WlanCom.wifiConnected || WlanCom.cpu_request_failed){
+    if (millis() - wifi_last_request >= WIFI_RETRY_CONNECTION){
+      WlanCom.connectWiFi(WIFI_CON_MAX_TIME);
+      return;
+    }
   }
 
-  // ── Control logic ─────────────────────────────────────────────────────
-  ControlMode mode = ws->getMode();
-  float pwrSP = ws->getPowerSetpoint();
-  int lvlSP = ws->getLevelSetpoint();
-
-  switch (mode) {
-    case ControlMode::UNKNOWN:
-      measuredPower = 0.0;
-      measuredLevel = 0;
-      ws->setStatusShort("Unbekannt");
-      ws->setStatusShortSetpoint("Unbekannt");
-      break;
-    case ControlMode::STOP:
-      measuredPower = 0.0;
-      measuredLevel = 0;
-      ws->setStatusShort("HALT");
-      ws->setStatusShortSetpoint("HALT");
-      break;
-    case ControlMode::CONSTANT_POWER:
-      measuredPower = pwrSP;  // replace with real sensor read
-      measuredLevel = 2;      // replace with real sensor read
-      ws->setStatusShort("Leistung");
-      ws->setStatusShortSetpoint("Leistung");
-      break;
-    case ControlMode::CONSTANT_LEVEL:
-      measuredPower = 45.0;   // replace with real sensor read
-      measuredLevel = lvlSP;  // replace with real sensor read
-      ws->setStatusShort("Pegel");
-      ws->setStatusShortSetpoint("Pegel");
-      break;
-    case ControlMode::CONSTANT_POWER_NIGHT:
-      measuredPower = pwrSP;  // replace with real sensor read
-      measuredLevel = 2;      // replace with real sensor read
-      ws->setStatusShort("Leistung N");
-      ws->setStatusShortSetpoint("Leistung N");
-      break;
-    case ControlMode::CONSTANT_LEVEL_NIGHT:
-      measuredPower = 45.0;   // replace with real sensor read
-      measuredLevel = lvlSP;  // replace with real sensor read
-      ws->setStatusShort("Pegel N");
-      ws->setStatusShortSetpoint("Pegel N");
-      break;
-    case ControlMode::FILLING:
-      measuredPower = 0.0;  // replace with real sensor read
-      measuredLevel = 0;    // replace with real sensor read
-      ws->setStatusShort("Speicher");
-      ws->setStatusShortSetpoint("Speicher");
-      break;
+  if (WlanCom.wificonnected && millis() - wifi_last_request >= WIFI_loop_request_timeoute){
+    response = WlanCom.httpGet("/api/get/new");
+    if (response == "true") {
+      response = WlanCom.httpGet("/api/get");
+      Serial.println(response);
+      //TODO: Convert to telegram
+      senderState = SEND;
+    }
   }
+  
 
-  ws->setPower(measuredPower);
-  ws->setLevel(measuredLevel);
 
-  // ── Periodic log ──────────────────────────────────────────────────────
-  if (ws->getAckErrors()) {
-    ws->resetAck();
-    ackErrors();
-  }
 }
