@@ -1,6 +1,6 @@
-<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36" version="29.6.6">
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36">
   <diagram name="Page-1" id="bfe91b75-5d2c-26a0-9c1d-138518896778">
-    <mxGraphModel dx="2778" dy="986" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="850" background="none" math="0" shadow="0">
+    <mxGraphModel dx="2301" dy="825" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="850" background="none" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
@@ -164,14 +164,6 @@
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="_v1y-HW3KLPp_lCWfMsm-5" edge="1" parent="1" source="0Ilv738atOBbmpKP2ohe-62" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="_v1y-HW3KLPp_lCWfMsm-4">
-          <mxGeometry relative="1" as="geometry">
-            <Array as="points">
-              <mxPoint x="170" y="1000" />
-              <mxPoint x="170" y="1230" />
-            </Array>
-          </mxGeometry>
-        </mxCell>
         <mxCell id="0Ilv738atOBbmpKP2ohe-62" parent="1" style="whiteSpace=wrap;html=1;aspect=fixed;" value="Lora RemoteNode" vertex="1">
           <mxGeometry height="80" width="80" x="230" y="940" as="geometry" />
         </mxCell>
@@ -288,8 +280,8 @@
         <mxCell id="0Ilv738atOBbmpKP2ohe-118" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="AI5" vertex="1">
           <mxGeometry height="30" width="60" x="-236" y="1190" as="geometry" />
         </mxCell>
-        <mxCell id="0Ilv738atOBbmpKP2ohe-119" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="Druck" vertex="1">
-          <mxGeometry height="30" width="60" x="-77" y="495" as="geometry" />
+        <mxCell id="0Ilv738atOBbmpKP2ohe-119" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="Drucksensor&amp;nbsp; Wicke A 10" vertex="1">
+          <mxGeometry height="30" width="77" x="-83.5" y="489" as="geometry" />
         </mxCell>
         <mxCell id="0Ilv738atOBbmpKP2ohe-120" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="Umgebungstemperatur" vertex="1">
           <mxGeometry height="30" width="60" x="-310" y="1101" as="geometry" />
@@ -299,9 +291,6 @@
         </mxCell>
         <mxCell id="_v1y-HW3KLPp_lCWfMsm-3" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="SPI" vertex="1">
           <mxGeometry height="30" width="60" x="125" y="1050" as="geometry" />
-        </mxCell>
-        <mxCell id="_v1y-HW3KLPp_lCWfMsm-4" parent="1" style="shape=step;perimeter=stepPerimeter;whiteSpace=wrap;html=1;fixedSize=1;flipH=1;legacyAnchorPoints=0;" value="SMS" vertex="1">
-          <mxGeometry height="80" width="90" x="50" y="1190" as="geometry" />
         </mxCell>
         <mxCell id="rYZ8RN9RpD2qeJyVwiWs-2" edge="1" parent="1" source="0Ilv738atOBbmpKP2ohe-29" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=-0.013;entryY=0.487;entryDx=0;entryDy=0;entryPerimeter=0;strokeColor=#006EAF;" target="0Ilv738atOBbmpKP2ohe-16">
           <mxGeometry relative="1" as="geometry" />

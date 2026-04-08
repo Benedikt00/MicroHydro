@@ -1,11 +1,15 @@
 #include <SD_management.h>
-#include <lcd_management.h>
+//#include <lcd_management.h>
 #include <lora.h>
 #include <nozzle_control.h>
 #include <telegram_management.h>
 #include <value_monitoring.h>
 #include <webserver.h>
-#include <http_client.h>
+
+
+#include <Wire.h>
+#include <Adafruit_BMP280.h>
+
 /*
  *   LLCC68 Pin  →  Arduino Pin
  *   ─────────────────────────
@@ -19,12 +23,12 @@
  *   BUSY        →  4
  *   DIO1        →  0
  *   ANT_SW      →  6  (optional, some boards need this for TX/RX switching)
+ *
+ *  SD CS 16
 */
 
 
 float test_mon = 0.5;
-
-String incomeing = "123.456.7100000000001773778573";
 
 //monitor_window test_value(0.0, 5.0, 0.05, 3000);
 int valok;
@@ -52,16 +56,17 @@ const int SD_SS = 32;
 const int LORA_MESSAGE_RETRYS = 3;
 int retries_used = 0;
 
-const int WIFI_RETRY_CONNECTION = 6000; //Retry connectiopn after disconnect
-const int WIFI_CON_MAX_TIME = 300; //maximum time to try to connect to wifi on startup, will be ramped up if not succsessful to ->
-const int WIFI_loop_request_timeoute = 300; //request time to cpu data
-unsigned long wifi_last_request; 
-
-// ── Access  config ───────────────────────────────────────────────────────
+// ── Access Point config ───────────────────────────────────────────────────────
+//  SSID must be ≤ 31 chars. Password must be ≥ 8 chars, or "" for open network.
 const char* AP_SSID = "blackbird_2.0";
-const char* AP_PASS = "groomlake";  
+const char* AP_PASS = "groomlake";  // set "" for an open (no password) AP
 
-static const IPAddress AP_IP(192, 168, 0, 2);
+const int WIFI_MAX_CONNECTION_TIME = 3000;
+const int WIFI_POLLING_RATE = 3000; //time after which cpu is requested again
+int last_wifi_req{0};
+
+static const IPAddress AP_IP(192, 168, 0, thisLORA_ID);
+static const uint16_t AP_PORT = 80;
 
 //INIT COMS
 LoRaCom lora_module(LORA_SS, LORA_DIO1, LORA_RESET, LORA_BUSY);
@@ -82,20 +87,30 @@ enum SenderState { SEND,
 SenderState senderState = RECIEVING;
 
 unsigned long lastSendTime = 0;
+unsigned long lastRecieveTime = 0;
 int packetCounter = 0;
 
 unsigned long ackSendTime = 0;
+unsigned long last_ack = 0;
+
 static bool waitingToAck = false;
 static bool waitingForAck = false;
 String pendingMsg = "";
 
 int message_sender_time = 20000;
-int LORA_WAIT_TO_ACK_TIMEOUT = 400;
-int LORA_WAIT_FOR_ACK = 5000;
-int LORA_AFTER_SEND_TIMEOUT = 200;
-int last_msg;
+long LORA_WAIT_TO_ACK_TIMEOUT = 400;
+long LORA_WAIT_FOR_ACK = 5000;
+long LORA_AFTER_SEND_TIMEOUT = 200;
+long LORA_REPLY_TIME = 500;
 
 bool lora_set_recieving = true;
+bool lora_send_reply = false;
+
+long last_msg = 0;
+
+//temperature sensor
+Adafruit_BMP280 bmp;
+int BMP_ADDR = 0x76;
 
 void setup() {
   delay(1000);
@@ -109,19 +124,26 @@ void setup() {
 
   Serial.println("Begin");
   lora_module.init();
+
   tel.errors.gw_lora_fail = lora_module.loraError;
   if (!lora_module.loraError) {
     lora_module.beginReceive();
   }
+   
+  tel.out_reciever_id = LORA_REMOTE_ID;
 
-  http_client WlanCom(AP_SSID, AP_PASS);
-  if (WlanCon.connectWiFi(WIFI_CON_MAX_TIME)){
-    Serial.println("Yay");
-  }
-
-  tel.out_reciever_id = LORA_GATEWAY_ID;
+  BMP_init();
 
   //SD_management sd(SD_SS);
+
+  http_client cpu_api();
+
+  if (cpu_api.connectWiFi(AP_SSID, AP_PASS, WIFI_MAX_CONNECTION_TIME)){
+    Serial.println("WiIfi init ok");
+  } else {
+    Serial.println("WiIfi init failed");
+  }
+
   //  lcd_management ld;
   /*
     ld.power = 254.2;
@@ -147,10 +169,11 @@ void setup() {
   };*/
 };
 
+
 void loop() {
   loracom();
   //lrsender();
-  
+  WIFI_loop();
 
   digitalWrite(led_onboard, led_State);
 
@@ -158,8 +181,12 @@ void loop() {
     led_blink_time = millis();
     led_State = !led_State;
   }
+/*
+  if (millis() - last_msg > message_sender_time) {
+    last_msg = millis();
+    senderState = SEND;
+  }*/
 };
-
 
 void ackErrors() {
   tel.errors.gw_lora_fail = false;
@@ -167,34 +194,50 @@ void ackErrors() {
   tel.errors.gw_lcd_fail = false;
   tel.errors.gw_wlan_ini_fail = false;
   tel.ack_out = 1;
-  senderState = SEND;
+  //senderState = SEND;
+  waitingForAck = false;
   Serial.println("ACK ERRORS");
-};
+}
 
 String payload;
 char buf[STATUS_MSG_LEN];
+
 
 void loracom() {
   switch (senderState) {
     case RECIEVING:
       {
         String msg = lora_module.receive();
+
         if (tel.errors.gw_lora_fail || tel.errors.remoteNode_not_reachable) {
           senderState = ERROR;
           break;
         }
 
+        //break recieve after send to avoid echo
         if (millis() - lastSendTime < LORA_AFTER_SEND_TIMEOUT) {
+          if (msg != ""){
+            Serial.println("^^Trown away");
+          }
           break;
-        } 
+        }
 
-        if (waitingToAck && (millis() - ackSendTime >= LORA_WAIT_TO_ACK_TIMEOUT)) {
+        //set send to reply after timeoute
+        if (lora_send_reply && !waitingForAck && (millis() - lastSendTime >= LORA_REPLY_TIME)){
+          Serial.println("Sending reply msg");
+          senderState = SEND;
+          lora_send_reply = false;
+          break;
+        }
+
+        //Send ack
+        if (waitingToAck && (millis() - lastRecieveTime >= LORA_WAIT_TO_ACK_TIMEOUT)) {
           Serial.println("Acknowledging, set state send");
           senderState = SEND;
           break;
         }
 
-                  
+        //recieve ack
         if (msg == "ACK") {
           Serial.println("ACK received! ");
           snprintf(buf, sizeof(buf), "Received: %s  RSSI: %.1f dBm", msg, lora_module.radio.getRSSI());
@@ -204,8 +247,11 @@ void loracom() {
           ws->pushStatusMessage(buf);
 
           waitingForAck = false;
+          //lora_send_reply = true;
           break;
-        } else if (waitingForAck && (millis() - lastSendTime > LORA_WAIT_FOR_ACK)) {
+        } 
+        //ack running intop timeout
+        else if (waitingForAck && (millis() - lastSendTime > LORA_WAIT_FOR_ACK)) {
           Serial.println("ACK timeout, retrying... " + String(retries_used));
           snprintf(buf, sizeof(buf), "ACK timeout, retrying... %1d", retries_used);
           ws->pushStatusMessage(buf);
@@ -224,14 +270,15 @@ void loracom() {
             ws->pushStatusMessage(buf);
           }
         }
-        if (msg != "") {  //new msg
+        //Handle NEw message recieve
+        if (msg != "") {  
           Serial.println("New msg " + String(msg.length()));
 
           if (msg.length() == tel.MSG_LENGTH) {  //right len
             Serial.println("Right len, for node " + msg.substring(tel.DEVICE_ID_SPOT, tel.DEVICE_ID_SPOT + 1));
             if (msg.substring(tel.DEVICE_ID_SPOT, tel.DEVICE_ID_SPOT + 1).toInt() == thisLORA_ID) {  //for this node
               tel.dec_incoming_msg(msg);
-              lastSendTime = millis();
+              lastRecieveTime = millis();
               Serial.println("MSG recieved " + msg);
               char buf[STATUS_MSG_LEN];
 
@@ -250,18 +297,26 @@ void loracom() {
 
     case SEND:
       {
+        //return if error
         if (tel.errors.gw_lora_fail || tel.errors.remoteNode_not_reachable) {
           senderState = ERROR;
           break;
         }
-        if (waitingToAck && (millis() - ackSendTime >= 100)) {
+        //send ack if requested
+        if (waitingToAck && (millis() - lastRecieveTime >= LORA_WAIT_TO_ACK_TIMEOUT)) {
           payload = "ACK";
           waitingToAck = false;
+          Serial.println("Sending ack after: " +  String(lastRecieveTime) + " " +  String(millis() - lastRecieveTime) + " TO: " + String(LORA_WAIT_TO_ACK_TIMEOUT));
+
+          //lora_send_reply = true;
         } else {
+          //set message
           payload = tel.enc_outgoing_msg();
           waitingForAck = true;
           Serial.println("Waiting for ack");
         }
+
+        //send
         lora_module.transmit(payload);
 
         if (lora_module.loraError) {
@@ -275,6 +330,8 @@ void loracom() {
         // Switch to receive mode to listen for ACK
 
         lastSendTime = millis();
+        Serial.println("Set Recieve");
+
         lora_module.beginReceive();
         senderState = RECIEVING;
         break;
@@ -296,26 +353,35 @@ void loracom() {
   }
 }
 
+int BMP_init(){
+  Wire.begin();
+
+  // Read the actual chip ID so we can report it
+  Wire.beginTransmission(BMP_ADDR);
+  Wire.write(0xD0);  // chip ID register
+  Wire.endTransmission(false);
+  Wire.requestFrom(BMP_ADDR, 1);
+  uint8_t chipId = Wire.read();
+  Serial.print(F("BMP Chip ID: 0x"));
+  Serial.println(chipId, HEX);
+  // 0x60 = genuine BMP280, 0x56/0x58 = sample/clone BMP280, 0x61 = BME680
+
+  // bmp.begin() normally rejects non-0x60 IDs.
+  // Passing the chip ID as the second argument tells the library to accept it.
+  if (!bmp.begin(0x76, chipId)) {
+    Serial.println(F("BMP ERROR: could not initialise BMP280."));
+    Serial.println(F("Try power-cycling the sensor"));
+    return false;
+  }
+  Serial.println("BMP init success");
+  return true;
+}
+
 
 void WIFI_loop() {
-  
-  if (!WlanCom.wifiConnected || WlanCom.cpu_request_failed){
-    if (millis() - wifi_last_request >= WIFI_RETRY_CONNECTION){
-      WlanCom.connectWiFi(WIFI_CON_MAX_TIME);
-      return;
+  if(cpu_api.wifi_connected){
+    if (millis() - last_wifi_req >= WIFI_POLLING_RATE){
+      
     }
   }
-
-  if (WlanCom.wificonnected && millis() - wifi_last_request >= WIFI_loop_request_timeoute){
-    response = WlanCom.httpGet("/api/get/new");
-    if (response == "true") {
-      response = WlanCom.httpGet("/api/get");
-      Serial.println(response);
-      //TODO: Convert to telegram
-      senderState = SEND;
-    }
-  }
-  
-
-
 }
