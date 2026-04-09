@@ -1,18 +1,7 @@
-#include "OptaBlue.h"
+#include <OptaBlue.h>
 #include "opta_abs.h"
 
 //https://opta.findernet.com/en/tutorial/user-manual
-
-//Web Server Config
-OptaBoardInfo *info;
-OptaBoardInfo *boardInfo();
-info = boardInfo();
-
-IPAddress ip(192, 168, 0, 3);
-int port = 80;
-
-WebserverAbstraction Webserver(info, ip, port)
-
 
 void setup(){
   Serial.begin(115200);
@@ -32,7 +21,7 @@ void setup(){
   AnalogExpansion aexp = OptaController.getExpansion(0);
 
   if(aexp) {
-    OptaAbstraction cpu(aexp);
+    opta_abs cpu(aexp);
 
   }
   else {
