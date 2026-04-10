@@ -2,18 +2,20 @@
 #include <OptaBlue.h>
 
 class opta_abs {
-
+private:
   float adc_to_V(int reading) {
     return (float)reading * 10.0 / 4095.0;  //= reading / 12 bit res * Vmax
   }
 
-  AnalogExpansion aexp
-  opta_abs(AnalogExpansion &analog_exp) {
-    aexp = analog_exp
+public:
+  AnalogExpansion& aexp;
+  opta_abs(AnalogExpansion& analog_exp)
+    : aexp(analog_exp) {
+      setup_io();
   }
 
   //Analog in
-  float water_temp_dC{0.0 };
+  float water_temp_dC{ 0.0 };
   float surround_temp_dC{ 0.0 };
   float water_preassure_bar{ 0.0 };
   float voltage_V{ 0.0 };
@@ -144,7 +146,7 @@ class opta_abs {
     ball_valve_open = digitalRead(A1);
     float_switch_triggered = digitalRead(A2);
     select_off = digitalRead(A3);
-    select_level = digitalRead(A4;
+    select_level = digitalRead(A4);
     select_remote = digitalRead(A5);
     current_A = adc_to_V(analogRead(A6)); //umrechnung noch notwendig
 
@@ -177,4 +179,4 @@ class opta_abs {
     aexp.pinVoltage(4, valve1_cv_pc / 10.0, true);
     aexp.pinVoltage(7, valve2_cv_pc / 10.0, true);
   }
-}
+};
