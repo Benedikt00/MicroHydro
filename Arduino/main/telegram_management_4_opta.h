@@ -14,7 +14,7 @@ public:
     bool remoteNode_not_reachable;
     bool gateway_not_reachable;
     bool level_station_not_reachable;
-    bool general_reserve4;
+    bool cpu_time_not_set;
     bool general_reserve5;
     bool general_reserve6;
 

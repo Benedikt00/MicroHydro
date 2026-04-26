@@ -304,6 +304,7 @@ void WIFI_loop() {
       // ── Build payload ───────────────────────────────────────────────────
       StaticJsonDocument<64> reqDoc;
       reqDoc["temperature"] = bmp.readTemperature();  // or whichever temp field
+      rewDoc["message"] = te.enc_outgoing_msg();
 
       String payload;
       serializeJson(reqDoc, payload);
@@ -327,7 +328,8 @@ void WIFI_loop() {
       Serial.printf("[WIFI] power=%.1f  sendFlag=%d  msg=%s\n", power, sendFlag, message);
 
       display.power = power;
-      display.status = status;
+      display.status = "Regelart:" + status;
+      display.update();
 
       // ── Act on response ─────────────────────────────────────────────────
       // cpu->some_power_field = power;
@@ -365,7 +367,7 @@ void setup() {
     lora_module.beginReceive();
   }
 
-  tel.out_reciever_id = LORA_REMOTE_ID;
+  tel.out_reciever_id = LORA_GATEWAY_ID;
 
   BMP_init();
 
@@ -376,6 +378,7 @@ void setup() {
     Serial.println("WiIfi init ok");
   } else {
     Serial.println("!!!! WiIfi init failed !!!!!");
+    display.error = "Wifi failed";
   }
   
     
@@ -398,14 +401,9 @@ void setup() {
 
 void loop() {
   //loracom();
-  //lrsender();
+
   WIFI_loop();
 
-  
-  if (millis() - lastUpdate >= LCD_RATE) {
-    lastUpdate = millis();
-    display.update();
-  }
 
   digitalWrite(led_onboard, led_State);
 

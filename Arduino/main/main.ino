@@ -27,6 +27,9 @@ static const uint8_t AP_CHANNEL = 6;
 static const uint16_t WS_PORT = 80;
 static IPAddress AP_IP(192, 168, 3, 1);
 
+// ── Telegram management ───────────────────────────────────────────────────────────
+telegram_management tel;
+
 // ────────────────────────────────────────────────────────────
 //  Time / schedule configuration
 // ────────────────────────────────────────────────────────────
@@ -490,6 +493,7 @@ void error_management() {
   // RTC timeout warning
   if (!is_time_set && millis() > 300000UL) {
     lamp_red = LampState::BLINK_SLOW;  // signal time-not-set
+    tel.cpu_time_not_set = true;
   }
 
   float level = cpu->level_meassured_p;
@@ -510,6 +514,9 @@ void error_management() {
     }
     lamp_red = LampState::BLINK_FAST;
   }
+
+  ws.msgString = tel.enc_outgoing_msg();
+  
 }
 
 // ============================================================
@@ -728,7 +735,7 @@ void loop() {
   //ws.setStatusShortSetpoint("OK");
   // ws.pushStatusMessage("some log line");
 
-  //error_management();
+  error_management();
 
   //run_control_mode();
 

@@ -1,10 +1,11 @@
 #include <SD_management.h>
-//#include <lcd_management.h>
+#include <lcd_management.h>
 #include <lora.h>
 #include <nozzle_control.h>
 #include <telegram_management.h>
 #include <value_monitoring.h>
 #include <webserver.h>
+#include <wire.h>
 
 /*
  *   LLCC68 Pin  →  Arduino Pin
@@ -58,6 +59,10 @@ WebserverAbstraction* ws = nullptr;
 //INIT COMS
 LoRaCom lora_module(LORA_SS, LORA_DIO1, LORA_RESET, LORA_BUSY);
 
+lcd_management display;
+unsigned long lastUpdateLcd = 0;
+const unsigned long LCD_RATE = 5000UL;   // refresh every 5 s
+
 telegram_management tel;
 
 float measuredPower = 0.0f;
@@ -71,7 +76,7 @@ enum SenderState { SEND,
                    RECIEVING,
                    ERROR };
 
-SenderState senderState = SEND;
+SenderState senderState = RECIEVING;
 
 unsigned long lastSendTime = 0;
 unsigned long lastRecieveTime = 0;
@@ -103,19 +108,34 @@ void setup() {
 
   digitalWrite(led_onboard, HIGH);
 
-  while (!Serial && millis() < 3000) {}
+  while (millis() < 3000) {}
 
   Serial.println("Begin");
+
+  Wire.begin();
+
+  display.init();
+  display.status = "Starte...";
+  display.update();
+
+  while (millis() < 6000) {}
+
   lora_module.init();
   tel.errors.gw_lora_fail = lora_module.loraError;
   if (!lora_module.loraError) {
     lora_module.beginReceive();
   }
+  display.status = "WIFI init...";
+  display.update();
   WIFI_init();
   tel.out_reciever_id = LORA_REMOTE_ID;
 
-  //SD_management sd(SD_SS);
-  //  lcd_management ld;
+  if (lora_module.loraError){
+    display.status = "LoRa error..";
+  }else{
+    display.status = "WIFI online..";
+  }
+  display.update();
   /*
     ld.power = 254.2;
     ld.status = "Testing";
@@ -146,17 +166,17 @@ void loop() {
   //lrsender();
   WIFI_loop();
 
-  digitalWrite(led_onboard, led_State);
 
-  if (millis() - led_blink_time > 3000) {
+  if (millis() - lastUpdateLcd > LCD_RATE) {
+    lastUpdateLcd = millis();
+    display.update();
+  }
+
+  if (millis() - led_blink_time > 2000) {
     led_blink_time = millis();
     led_State = !led_State;
   }
-
-  if (millis() - last_msg > message_sender_time) {
-    last_msg = millis();
-    senderState = SEND;
-  }
+  digitalWrite(led_onboard, led_State);
 };
 
 void ackErrors() {
