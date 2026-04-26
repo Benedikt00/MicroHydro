@@ -21,16 +21,6 @@
  *   ANT_SW      →  6  (optional, some boards need this for TX/RX switching)
 */
 
-
-float test_mon = 0.5;
-
-//monitor_window test_value(0.0, 5.0, 0.05, 3000);
-int valok;
-
-nz_controller nz_con(2.4, 200.0);
-
-float* nozzels;
-
 int led_onboard = 2;
 long led_blink_time;
 bool led_State = LOW;

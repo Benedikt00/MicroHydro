@@ -14,30 +14,35 @@
 #define HTTP_POST "POST"
 
 #define MAX_METHOD_LEN 16
-#define MAX_PATH_LEN   128
+#define MAX_PATH_LEN 128
 #define STATUS_MSG_COUNT 10
-#define STATUS_MSG_LEN   41   // 40 chars + null
-#define STATUS_SHORT_LEN 21   // 20 chars + null
+#define STATUS_MSG_LEN 41    // 40 chars + null
+#define STATUS_SHORT_LEN 21  // 20 chars + null
+
+#define SENSOR_PATH "/api/sensor"
+#define SENSOR_STRING_LEN 64
 
 #define POWER_MAX 340
-#define LEVEL_MAX 300
+#define LEVEL_MAX 100
 
 #define CLIENT_TIMEOUT_MS 2000UL
-#define HTML_CHUNK_SIZE   256   // bytes sent per update() call when streaming HTML
+#define HTML_CHUNK_SIZE 256  // bytes sent per update() call when streaming HTML
 
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <WiFiServer.h>
 #include <ArduinoJson.h>
-#include <avr/pgmspace.h>   // PROGMEM / pgm_read_byte / strlen_P
+// NOTE: avr/pgmspace.h removed — Opta is ARM Cortex-M7, not AVR.
+//       HTML strings are stored in regular RAM/flash via the linker (no PROGMEM needed).
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  PROGMEM HTML pages
-//  Kept in flash so they don't eat SRAM.  The server streams them in chunks.
+//  HTML pages
+//  On Opta (ARM) there is no Harvard architecture — strings live in flash
+//  automatically via the linker. No PROGMEM / pgm_read_byte needed.
 //  The literal %BASE% token is substituted at stream time with "http://<ip>:<port>".
 // ─────────────────────────────────────────────────────────────────────────────
 
-static const char CPU_HTML[] PROGMEM =
+static const char CPU_HTML[] =
   "<!DOCTYPE html><html><head>"
   "<meta charset='UTF-8'/>"
   "<meta name='viewport' content='width=device-width,initial-scale=1'/>"
@@ -116,19 +121,19 @@ static const char CPU_HTML[] PROGMEM =
   "setInterval(p,2000);p();"
   "</script></body></html>";
 
-static const char HMI_HTML[] PROGMEM =
+static const char HMI_HTML[] =
   "<!DOCTYPE html><html><head>"
   "<meta charset='UTF-8'/>"
   "<meta name='viewport' content='width=device-width,initial-scale=1'/>"
   "<title>Steuerung</title>"
   "<style>"
   "*{box-sizing:border-box;margin:0;padding:0}"
-  "body{font-family:monospace;font-size:14px;color:#111;background:#fff;padding:12px;max-width:480px}"
+  /*"body{font-family:monospace;font-size:14px;color:#111;background:#fff;padding:12px;max-width:480px}"
   "a{color:inherit;font-size:12px;display:inline-block;margin-bottom:14px;text-decoration:underline}"
   "h2{font-size:15px;font-weight:500;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid #ddd}"
   ".mo{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:16px}"
   "button{font-family:monospace;font-size:13px;padding:10px 6px;border:1px solid #ccc;"
-  "background:transparent;color:inherit;border-radius:6px;cursor:pointer;width:100%;text-align:center}"
+  "background:transparent;color:inherit;border-radius:6px;cursor:pointer;width:100%;text-align:center}"*/
   "button.on{background:#111;color:#fff;border-color:#111}"
   ".sp{display:none;flex-direction:column;gap:6px;margin-bottom:16px}"
   ".sp.show{display:flex}"
@@ -185,7 +190,7 @@ static const char HMI_HTML[] PROGMEM =
   "sr.value=Math.min(d&&d.powerSetpoint!=null?d.powerSetpoint:0,340);"
   "}else{"
   "sl.childNodes[0].textContent='Pegel Sollwert ';"
-  "su.textContent=' cm';sr.max='300';"
+  "su.textContent=' %';sr.max='100';"
   "sr.value=Math.min(d&&d.levelSetpoint!=null?d.levelSetpoint:0,300);"
   "}"
   "document.getElementById('sv').textContent=sr.value;"
@@ -220,7 +225,9 @@ static const char HMI_HTML[] PROGMEM =
   "if(document.activeElement.id!=='sr'){"
   "const m=d.mode??1;"
   "if(m!==mode)await setMode(m);else applySlider(m,d);"
-  "}}catch(e){}}"
+  "}"
+  "document.getElementById('ti').textContent= new Date(d.currentTime*1000).toLocaleString();"
+  "}catch(e){}}"
   "setInterval(poll,4000);poll();"
   "</script></body></html>";
 
@@ -254,15 +261,23 @@ struct DeviceState {
   bool timeUpdated;
   int ackErrors;
 
+  // Sensor endpoint
+  float sensorTemperature;
+  bool msgSendFlag;        // set externally → sent in next response, then auto-cleared
+  char msgString[SENSOR_STRING_LEN];
+
   DeviceState()
     : power(0), level(0),
       mode(ControlMode::UNKNOWN),
       powerSetpoint(0), levelSetpoint(0),
-      clientEpoch(0), timeUpdated(false), ackErrors(0) {
+      clientEpoch(0), timeUpdated(false), ackErrors(0),
+      sensorTemperature(0.0f),
+      msgSendFlag(false) {
     for (int i = 0; i < STATUS_MSG_COUNT; i++) statusMessages[i][0] = '\0';
     statusShort[0] = '\0';
     statusShortSetpoint[0] = '\0';
-  }
+    msgString[0] = '\0';
+  };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -271,36 +286,30 @@ struct DeviceState {
 class WebserverAbstraction {
 public:
 
-  // ── Constructor ───────────────────────────────────────────────────────────
-  // Does NOT call _server.begin() — call begin() after WiFi.beginAP() succeeds.
   WebserverAbstraction(IPAddress ip, uint16_t port)
     : _ip(ip), _port(port), _server(port),
       _clientActive(false), _connState(ConnState::IDLE),
       _contentLength(0), _htmlProgmem(nullptr), _htmlLen(0), _htmlSent(0) {}
 
-  // ── Call once after WiFi.beginAP() returns WL_AP_LISTENING ───────────────
   void begin() {
     _server.begin();
     Serial.println("[WS] Server started on " + _ip.toString() + ":" + String(_port));
   }
 
-  // ── Main loop call — non-blocking, returns immediately ───────────────────
   void update() {
-    // Accept a new client only when idle
     if (!_clientActive) {
       _client = _server.available();
       if (!_client) return;
-      _clientActive  = true;
-      _connState     = ConnState::READING_HEADER;
-      _headerBuf     = "";
-      _body          = "";
+      _clientActive = true;
+      _connState = ConnState::READING_HEADER;
+      _headerBuf = "";
+      _body = "";
       _contentLength = 0;
-      _deadline      = millis() + CLIENT_TIMEOUT_MS;
-      _htmlProgmem   = nullptr;
-      _htmlSent      = 0;
+      _deadline = millis() + CLIENT_TIMEOUT_MS;
+      _htmlProgmem = nullptr;
+      _htmlSent = 0;
     }
 
-    // Timeout guard — drops stalled connections without blocking
     if (millis() > _deadline) {
       Serial.println("[WS] Client timeout");
       _closeClient();
@@ -361,8 +370,12 @@ public:
     _sd.statusMessages[STATUS_MSG_COUNT - 1][STATUS_MSG_LEN - 1] = '\0';
   }
 
-  void setPower(float v) { _sd.power = constrain(v, 0, POWER_MAX); }
-  void setLevel(float v) { _sd.level = constrain(v, 0, LEVEL_MAX); }
+  void setPower(float v) {
+    _sd.power = constrain(v, 0, POWER_MAX);
+  }
+  void setLevel(float v) {
+    _sd.level = constrain(v, 0, LEVEL_MAX);
+  }
 
   void setStatusShort(const char* s) {
     strncpy(_sd.statusShort, s, STATUS_SHORT_LEN - 1);
@@ -376,103 +389,231 @@ public:
 
   // ── GETTERS ───────────────────────────────────────────────────────────────
 
-  bool        getAckErrors()         const { return _sd.ackErrors == 1; }
-  void        resetAck()                   { _sd.ackErrors = 0; }
-  ControlMode getMode()              const { return _sd.mode; }
-  float       getPowerSetpoint()     const { return _sd.powerSetpoint; }
-  int         getLevelSetpoint()     const { return (int)_sd.levelSetpoint; }
-  uint32_t    getClientEpoch()       const { return _sd.clientEpoch; }
-  float       getPower()             const { return _sd.power; }
-  float       getLevel()             const { return _sd.level; }
-  const char* getStatusShort()       const { return _sd.statusShort; }
-  const char* getStatusShortSetpoint() const { return _sd.statusShortSetpoint; }
+  bool getAckErrors() const {
+    return _sd.ackErrors == 1;
+  }
+  void resetAck() {
+    _sd.ackErrors = 0;
+  }
+
+  ControlMode getMode() const {
+    return _sd.mode;
+  }
+  
+  ControlMode setMode(ControlMode nextt) {
+    _sd.mode = nextt;
+    return _sd.mode;
+  }
+
+  float getPowerSetpoint() const {
+    return _sd.powerSetpoint;
+  }
+  int getLevelSetpoint() const {
+    return (int)_sd.levelSetpoint;
+  }
+  uint32_t getClientEpoch() const {
+    return _sd.clientEpoch;
+  }
+  float getPower() const {
+    return _sd.power;
+  }
+  float getLevel() const {
+    return _sd.level;
+  }
+  const char* getStatusShort() const {
+    return _sd.statusShort;
+  }
+  const char* getStatusShortSetpoint() const {
+    return _sd.statusShortSetpoint;
+  }
   const char* getStatusMessage(uint8_t i) const {
     return (i < STATUS_MSG_COUNT) ? _sd.statusMessages[i] : "";
   }
 
   bool hasNewClientTime() {
-    if (_sd.timeUpdated) { _sd.timeUpdated = false; return true; }
+    if (_sd.timeUpdated) {
+      _sd.timeUpdated = false;
+      return true;
+    }
     return false;
   }
 
-  const DeviceState& getState() const { return _sd; }
+  const DeviceState& getState() const {
+    return _sd;
+  }
 
-// ─────────────────────────────────────────────────────────────────────────────
+  // Sensor temperature — written by the remote sensor via POST /api/sensor
+  float getTemp() const {
+    return _sd.sensorTemperature;
+  }
+
+
+
+  // Send flag + string — set externally, consumed on next sensor poll, then cleared
+  void setMessage(const char* msg, bool activate = true) {
+    strncpy(_sd.msgString, msg, SENSOR_STRING_LEN - 1);
+    _sd.msgString[SENSOR_STRING_LEN - 1] = '\0';
+    _sd.msgSendFlag = activate;
+  }
+  void clearMessage() {
+    _sd.msgSendFlag = false;
+    _sd.msgString[0] = '\0';
+  }
+  bool getmsgSendFlag() const {
+    return _sd.msgSendFlag;
+  }
+  const char* getSensorString() const {
+    return _sd.msgString;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
 private:
-// ─────────────────────────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────────────────
 
   enum class ConnState : uint8_t {
-    IDLE, READING_HEADER, READING_BODY, DISPATCHING, STREAMING_HTML, DONE
+    IDLE,
+    READING_HEADER,
+    READING_BODY,
+    DISPATCHING,
+    STREAMING_HTML,
+    DONE
   };
 
-  IPAddress    _ip;
-  uint16_t     _port;
-  WiFiServer   _server;
-  WiFiClient   _client;
-  bool         _clientActive;
+  IPAddress _ip;
+  uint16_t _port;
+  WiFiServer _server;
+  WiFiClient _client;
+  bool _clientActive;
 
-  ConnState    _connState;
-  String       _headerBuf;
-  String       _body;
-  String       _methodStr;
-  String       _pathStr;
-  int          _contentLength;
+  ConnState _connState;
+  String _headerBuf;
+  String _body;
+  String _methodStr;
+  String _pathStr;
+  int _contentLength;
   unsigned long _deadline;
 
-  // PROGMEM HTML streaming
-  const char*  _htmlProgmem;
-  size_t       _htmlLen;
-  size_t       _htmlSent;
-  String       _base;   // "http://<ip>:<port>", built once per request
+  // HTML streaming (plain pointer — no PROGMEM on ARM)
+  const char* _htmlProgmem;  // name kept for minimal diff; points to regular char[]
+  size_t _htmlLen;
+  size_t _htmlSent;
+  String _base;  // "http://<ip>:<port>", built once per request
 
-  DeviceState              _sd;
+  DeviceState _sd;
   StaticJsonDocument<1024> _res;
-  StaticJsonDocument<256>  _req;
+  StaticJsonDocument<256> _req;
 
   // ── Parse method, path, Content-Length from buffered header ──────────────
   void _parseHeader() {
     int sp1 = _headerBuf.indexOf(' ');
     int sp2 = _headerBuf.indexOf(' ', sp1 + 1);
-    if (sp1 < 0 || sp2 < 0) { _connState = ConnState::DONE; return; }
+    if (sp1 < 0 || sp2 < 0) {
+      _connState = ConnState::DONE;
+      return;
+    }
 
     _methodStr = _headerBuf.substring(0, sp1);
-    _pathStr   = _headerBuf.substring(sp1 + 1, sp2);
+    _pathStr = _headerBuf.substring(sp1 + 1, sp2);
 
     int clIdx = _headerBuf.indexOf("Content-Length: ");
     _contentLength = (clIdx >= 0)
-      ? _headerBuf.substring(clIdx + 16, _headerBuf.indexOf('\r', clIdx)).toInt()
-      : 0;
+                       ? _headerBuf.substring(clIdx + 16, _headerBuf.indexOf('\r', clIdx)).toInt()
+                       : 0;
 
     Serial.println("[WS] " + _methodStr + " " + _pathStr);
   }
 
-  // ── Route request ─────────────────────────────────────────────────────────
   void _dispatch() {
     _base = "http://" + _ip.toString() + ":" + String(_port);
 
-    if (_pathStr == TIME_PATH) {
-      if (_methodStr == HTTP_POST) _handleTimePost(); else _badRequest();
+    // ── POST /api/sensor ───────────────────────────────────────────────────────
+    if (_pathStr == SENSOR_PATH) {
+      if (_methodStr == HTTP_POST) _handleESPPost();
+      else _badRequest();
       _connState = ConnState::DONE;
 
+      // ── /api/time ──────────────────────────────────────────────────────────────
+    } else if (_pathStr == TIME_PATH) {
+      if (_methodStr == HTTP_POST) _handleTimePost();
+      else _badRequest();
+      _connState = ConnState::DONE;
+
+      // ── /api ───────────────────────────────────────────────────────────────────
     } else if (_pathStr == API_PATH) {
-      if      (_methodStr == HTTP_GET)  { _sendApiState(); }
-      else if (_methodStr == HTTP_POST) { if (_body.length()) _parseControlRequest(); _sendApiState(); }
-      else                              { _badRequest(); }
+      if (_methodStr == HTTP_GET) {
+        _sendApiState();
+      } else if (_methodStr == HTTP_POST) {
+        if (_body.length()) _parseControlRequest();
+        _sendApiState();
+      } else {
+        _badRequest();
+      }
       _connState = ConnState::DONE;
 
+      // ── / (HMI or status page) ─────────────────────────────────────────────────
     } else if (_pathStr == "/" || _pathStr.startsWith("/?")) {
       if (_methodStr == HTTP_GET) {
         _beginHtmlResponse(_pathStr.indexOf("hmi") >= 0);
-        // _connState set to STREAMING_HTML inside _beginHtmlResponse
+        // _connState → STREAMING_HTML set inside _beginHtmlResponse
       } else {
         _badRequest();
         _connState = ConnState::DONE;
       }
 
+      // ── 404 ────────────────────────────────────────────────────────────────────
     } else {
       _notFound();
       _connState = ConnState::DONE;
     }
+  }
+
+  // ── POST /api/sensor ──────────────────────────────────────────────────────────
+  // Request  (JSON): { "temperature": 23.4 }
+  // Response (JSON): { "power": 120.0, "sendFlag": true, "message": "hello" }
+  //                  sendFlag + message are cleared after sending.
+  void _handleESPPost() {
+    // Parse incoming temperature
+    _req.clear();
+    Serial.println("API request");
+    DeserializationError err = deserializeJson(_req, _body);
+    if (err) {
+      Serial.println("[WS] Sensor JSON err: " + String(err.f_str()));
+      _badRequest();
+      return;
+    }
+
+    if (_req.containsKey("temperature"))
+      _sd.sensorTemperature = (float)_req["temperature"];
+
+    // Build response
+    _res.clear();
+    _res["power"] = _sd.power;
+    _res["level"] = _sd.level;
+    _res["sendFlag"] = _sd.msgSendFlag;
+    _res["message"] = _sd.msgSendFlag ? _sd.msgString : "";
+    _res["status"] = _sd.statusShort;
+
+    // Auto-clear flag + string after sending
+    if (_sd.msgSendFlag) {
+      _sd.msgSendFlag = false;
+      _sd.msgString[0] = '\0';
+    }
+
+    String body;
+    serializeJson(_res, body);
+
+    _client.print("HTTP/1.1 200 OK\r\nConnection: close\r\n"
+                  "Content-Type: application/json\r\n"
+                  "Access-Control-Allow-Origin: *\r\n"
+                  "Content-Length: ");
+    _client.print(body.length() + 1);
+    _client.print("\r\n\r\n");
+    _client.println(body);
+  }
+
+  unsigned long getTime() {
+    time_t seconds = time(NULL);
+    return (unsigned int)seconds;
   }
 
   // ── POST /api/time ────────────────────────────────────────────────────────
@@ -481,7 +622,6 @@ private:
     if (!deserializeJson(_req, _body) && _req.containsKey("epoch")) {
       _sd.clientEpoch = (uint32_t)_req["epoch"];
       _sd.timeUpdated = true;
-      Serial.println("[WS] Time synced: " + String(_sd.clientEpoch));
     }
     _client.print(
       "HTTP/1.1 200 OK\r\n"
@@ -489,15 +629,17 @@ private:
       "Content-Type: application/json\r\n"
       "Content-Length: 15\r\n"
       "\r\n"
-      "{\"status\":\"ok\"}\n"
-    );
+      "{\"status\":\"ok\"}\n");
   }
 
   // ── Parse POST /api ───────────────────────────────────────────────────────
   void _parseControlRequest() {
     _req.clear();
     DeserializationError err = deserializeJson(_req, _body);
-    if (err) { Serial.println("[WS] JSON err: " + String(err.f_str())); return; }
+    if (err) {
+      Serial.println("[WS] JSON err: " + String(err.f_str()));
+      return;
+    }
 
     if (_req.containsKey("mode"))
       _sd.mode = (ControlMode)constrain((uint8_t)_req["mode"], 0, 6);
@@ -516,16 +658,18 @@ private:
 
   // ── GET /api — send JSON state ────────────────────────────────────────────
   void _sendApiState() {
+   
     _res.clear();
     JsonArray msgs = _res.createNestedArray("statusMessages");
     for (int i = 0; i < STATUS_MSG_COUNT; i++) msgs.add(_sd.statusMessages[i]);
-    _res["power"]               = _sd.power;
-    _res["level"]               = _sd.level;
-    _res["statusShort"]         = _sd.statusShort;
+    _res["power"] = _sd.power;
+    _res["level"] = _sd.level;
+    _res["statusShort"] = _sd.statusShort;
     _res["statusShortSetpoint"] = _sd.statusShortSetpoint;
-    _res["mode"]                = (uint8_t)_sd.mode;
-    _res["powerSetpoint"]       = _sd.powerSetpoint;
-    _res["levelSetpoint"]       = _sd.levelSetpoint;
+    _res["mode"] = (uint8_t)_sd.mode;
+    _res["powerSetpoint"] = _sd.powerSetpoint;
+    _res["levelSetpoint"] = _sd.levelSetpoint;
+    _res["currentTime"] = getTime();
 
     String body;
     serializeJson(_res, body);
@@ -540,24 +684,20 @@ private:
   }
 
   // ── Send HTTP header then switch to STREAMING_HTML state ─────────────────
-  // Content-Length is calculated by counting %BASE% occurrences and adjusting.
   void _beginHtmlResponse(bool isHmi) {
     _htmlProgmem = isHmi ? HMI_HTML : CPU_HTML;
-    _htmlLen     = strlen_P(_htmlProgmem);
-    _htmlSent    = 0;
+    _htmlLen = strlen(_htmlProgmem);  // plain strlen — no PROGMEM on ARM
+    _htmlSent = 0;
 
+    // Count %BASE% occurrences to calculate exact Content-Length
+    const size_t TOKEN_LEN = 6;  // strlen("%BASE%")
     size_t occ = 0;
-    for (size_t i = 0; i + 5 < _htmlLen; i++) {
-      if (pgm_read_byte(_htmlProgmem + i)     == '%' &&
-          pgm_read_byte(_htmlProgmem + i + 1) == 'B' &&
-          pgm_read_byte(_htmlProgmem + i + 2) == 'A' &&
-          pgm_read_byte(_htmlProgmem + i + 3) == 'S' &&
-          pgm_read_byte(_htmlProgmem + i + 4) == 'E' &&
-          pgm_read_byte(_htmlProgmem + i + 5) == '%') {
+    for (size_t i = 0; i + TOKEN_LEN <= _htmlLen; i++) {
+      if (_htmlProgmem[i] == '%' && _htmlProgmem[i + 1] == 'B' && _htmlProgmem[i + 2] == 'A' && _htmlProgmem[i + 3] == 'S' && _htmlProgmem[i + 4] == 'E' && _htmlProgmem[i + 5] == '%') {
         occ++;
       }
     }
-    size_t bodyLen = _htmlLen + occ * (_base.length() - 6) + 1; // +1 trailing \n
+    size_t bodyLen = _htmlLen + occ * (_base.length() - TOKEN_LEN) + 1;  // +1 trailing \n
 
     _client.print("HTTP/1.1 200 OK\r\nConnection: close\r\n"
                   "Content-Type: text/html; charset=utf-8\r\n"
@@ -568,24 +708,24 @@ private:
     _connState = ConnState::STREAMING_HTML;
   }
 
-  // ── Stream next chunk of PROGMEM HTML, substituting %BASE% inline ─────────
+  // ── Stream next chunk, substituting %BASE% inline ─────────────────────────
+  // Direct array indexing replaces pgm_read_byte() — identical logic otherwise.
   void _streamHtmlChunk() {
-    if (!_client.connected()) { _closeClient(); return; }
+    if (!_client.connected()) {
+      _closeClient();
+      return;
+    }
 
+    const size_t TOKEN_LEN = 6;
     int sent = 0;
+
     while (_htmlSent < _htmlLen && sent < HTML_CHUNK_SIZE) {
-      if (_htmlLen - _htmlSent >= 6 &&
-          pgm_read_byte(_htmlProgmem + _htmlSent)     == '%' &&
-          pgm_read_byte(_htmlProgmem + _htmlSent + 1) == 'B' &&
-          pgm_read_byte(_htmlProgmem + _htmlSent + 2) == 'A' &&
-          pgm_read_byte(_htmlProgmem + _htmlSent + 3) == 'S' &&
-          pgm_read_byte(_htmlProgmem + _htmlSent + 4) == 'E' &&
-          pgm_read_byte(_htmlProgmem + _htmlSent + 5) == '%') {
+      if (_htmlLen - _htmlSent >= TOKEN_LEN && _htmlProgmem[_htmlSent] == '%' && _htmlProgmem[_htmlSent + 1] == 'B' && _htmlProgmem[_htmlSent + 2] == 'A' && _htmlProgmem[_htmlSent + 3] == 'S' && _htmlProgmem[_htmlSent + 4] == 'E' && _htmlProgmem[_htmlSent + 5] == '%') {
         _client.print(_base);
-        _htmlSent += 6;
-        sent      += _base.length();
+        _htmlSent += TOKEN_LEN;
+        sent += _base.length();
       } else {
-        _client.write(pgm_read_byte(_htmlProgmem + _htmlSent++));
+        _client.write(_htmlProgmem[_htmlSent++]);
         sent++;
       }
     }
@@ -597,15 +737,19 @@ private:
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
-  void _badRequest() { _client.print("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"); }
-  void _notFound()   { _client.print("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n"); }
+  void _badRequest() {
+    _client.print("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+  }
+  void _notFound() {
+    _client.print("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+  }
 
   void _closeClient() {
     delay(1);
     _client.stop();
     _clientActive = false;
-    _connState    = ConnState::IDLE;
-    _headerBuf    = "";
-    _body         = "";
+    _connState = ConnState::IDLE;
+    _headerBuf = "";
+    _body = "";
   }
 };
