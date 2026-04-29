@@ -1,5 +1,5 @@
 #pragma once
-
+#include <my_log.h>
 // ─────────────────────────────────────────────────────────────────────────────
 //  WebserverAbstraction.h
 //  HTTP server for Arduino Opta WiFi running as an Access Point.
@@ -293,7 +293,7 @@ public:
 
   void begin() {
     _server.begin();
-    Serial.println("[WS] Server started on " + _ip.toString() + ":" + String(_port));
+    my_log("[WS] Server started on " + _ip.toString() + ":" + String(_port));
   }
 
   void update() {
@@ -311,7 +311,7 @@ public:
     }
 
     if (millis() > _deadline) {
-      Serial.println("[WS] Client timeout");
+      my_log("[WS] Client timeout");
       _closeClient();
       return;
     }
@@ -466,6 +466,16 @@ public:
     return _sd.msgString;
   }
 
+  bool is_new_msg_avail(){
+    return rec_new_msg;
+      
+  }
+
+  String get_new_msg(){
+    rec_new_msg = false;
+    return new_inc_msg;
+  }
+
   // ─────────────────────────────────────────────────────────────────────────────
 private:
   // ─────────────────────────────────────────────────────────────────────────────
@@ -520,7 +530,7 @@ private:
                        ? _headerBuf.substring(clIdx + 16, _headerBuf.indexOf('\r', clIdx)).toInt()
                        : 0;
 
-    Serial.println("[WS] " + _methodStr + " " + _pathStr);
+    my_log("[WS] " + _methodStr + " " + _pathStr);
   }
 
   void _dispatch() {
@@ -574,10 +584,10 @@ private:
   void _handleESPPost() {
     // Parse incoming temperature
     _req.clear();
-    Serial.println("API request");
+    my_log("API request");
     DeserializationError err = deserializeJson(_req, _body);
     if (err) {
-      Serial.println("[WS] Sensor JSON err: " + String(err.f_str()));
+      my_log("[WS] Sensor JSON err: " + String(err.f_str()));
       _badRequest();
       return;
     }
@@ -632,28 +642,25 @@ private:
       "{\"status\":\"ok\"}\n");
   }
 
+  bool rec_new_msg = false;
+  String new_inc_msg = "";
+
+  
   // ── Parse POST /api ───────────────────────────────────────────────────────
   void _parseControlRequest() {
     _req.clear();
     DeserializationError err = deserializeJson(_req, _body);
     if (err) {
-      Serial.println("[WS] JSON err: " + String(err.f_str()));
+      my_log("[WS] JSON err: " + String(err.f_str()));
       return;
     }
 
-    if (_req.containsKey("mode"))
-      _sd.mode = (ControlMode)constrain((uint8_t)_req["mode"], 0, 6);
-    if (_req.containsKey("powerSetpoint"))
-      _sd.powerSetpoint = constrain((float)_req["powerSetpoint"], 0.0f, (float)POWER_MAX);
-    if (_req.containsKey("levelSetpoint"))
-      _sd.levelSetpoint = constrain((int)_req["levelSetpoint"], 0, (int)LEVEL_MAX);
-    if (_req.containsKey("ackErrors"))
-      _sd.ackErrors = constrain((int)_req["ackErrors"], 0, 2);
+    if (_req.containsKey("message")){
+      new_inc_msg = String((const char*)_req["message"]);
+    }
 
-    Serial.println("[WS] mode=" + String((int)_sd.mode)
-                   + " pwr=" + String(_sd.powerSetpoint)
-                   + " lvl=" + String(_sd.levelSetpoint)
-                   + " ack=" + String(_sd.ackErrors));
+    rec_new_msg = true;
+    
   }
 
   // ── GET /api — send JSON state ────────────────────────────────────────────

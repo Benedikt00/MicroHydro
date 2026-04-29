@@ -12,7 +12,8 @@
 #include <WiFiServer.h>
 //#include "opta_wifi_ap.h"
 #include <ArduinoJson.h>
-
+#define LOG_PLATFORM_OPTA
+#include <my_log.h>
 //todo vermutlich wird der setpoiint geändert und nicht filling ect für day night mal schaun
 
 // ────────────────────────────────────────────────────────────
@@ -26,9 +27,12 @@ static const uint8_t AP_CHANNEL = 6;
 // ── Server instance ───────────────────────────────────────────────────────────
 static const uint16_t WS_PORT = 80;
 static IPAddress AP_IP(192, 168, 3, 1);
+const int esp_send_time = 30000;
+unsigned long last_esp_send{0};
 
 // ── Telegram management ───────────────────────────────────────────────────────────
-telegram_management tel;
+telegram_management tel_inc;
+telegram_management tel_out;
 
 // ────────────────────────────────────────────────────────────
 //  Time / schedule configuration
@@ -159,35 +163,40 @@ void on_night_start() {
   }
 }
 
+void handle_new_msg(){
+  if (tel_inc.operating_mode == 0){ //doudel tut reinitialisieren
+    ws.setMessage(tel_out.enc_outgoing_msg().c_str());
+    last_esp_send = millis();
+    my_log("WS send set after reiint of subcomponent");
+  }
+  //todo, inc to out
+}
+
 // ============================================================
 //  WIFI
 // ============================================================
 void wifi_setup() {
-  Serial.print("[WiFi] Starting AP \"");
-  Serial.print(AP_SSID);
-  Serial.print("\" … ");
+  my_log("[WiFi] Starting AP \"");
+  my_log(AP_SSID);
+  my_log("\" … ");
 
   int status = WiFi.beginAP(AP_SSID, AP_PASSWORD, AP_CHANNEL);
   if (status != WL_AP_LISTENING) {
-    Serial.println("FAILED. Halting.");
+    my_log("FAILED. Halting.");
     while (true)
       ;
   }
-  Serial.println("OK");
+  my_log("OK");
 
   delay(1000);
 
-  Serial.print("[WiFi] IP  : ");
-  Serial.println(WiFi.localIP());
-  Serial.print("[WiFi] MAC : ");
-  Serial.println(WiFi.macAddress());
+  my_log("[WiFi] IP  : ");
+  my_log(String(WiFi.localIP()));
 
   ws.begin();
 }
 
-void wifi_loop() {
-  ws.update();
-}
+
 // ============================================================
 //  Control-mode setter
 //  Call this from the hardware selector, the webserver, or
@@ -220,7 +229,7 @@ void set_control_mode(ControlMode requested_mode,
     case ControlMode::STOP:
       cmi = ControlMode::STOP;
       cmi_sec = ControlMode::UNKNOWN;
-      Serial.println("CMI set to STOP");
+      my_log("CMI set to STOP");
       break;
 
     case ControlMode::CONSTANT_POWER:
@@ -228,7 +237,7 @@ void set_control_mode(ControlMode requested_mode,
       cmi = requested_mode;
       setpoint_power_w = (power_setpoint_w > 0.0f) ? power_setpoint_w : 100.0f;
       cmi_sec = is_day ? ControlMode::FILLING : ControlMode::CONSTANT_POWER;  //todo check if needs to be filling
-      Serial.println("CMI set to CONSTANT_POWER/NIGHT");
+      my_log("CMI set to CONSTANT_POWER/NIGHT");
       break;
 
     case ControlMode::CONSTANT_LEVEL:
@@ -241,24 +250,62 @@ void set_control_mode(ControlMode requested_mode,
       lc_indirect_setpoint = setpoint_level_pc;
       lc_integrator = 0.0f;
       cmi_sec = is_day ? ControlMode::FILLING : ControlMode::CONSTANT_LEVEL;  //todo check if needs to be filling
-      Serial.println("CMI set to CONSTANT_LEVEL/NIGHT");
+      my_log("CMI set to CONSTANT_LEVEL/NIGHT");
 
       break;
 
     case ControlMode::FILLING:
       cmi = ControlMode::FILLING;
       cmi_sec = ControlMode::UNKNOWN;
-      Serial.println("CMI set to FILLING");
+      my_log("CMI set to FILLING");
 
       break;
 
     default:
       cmi = ControlMode::STOP;
       cmi_sec = ControlMode::UNKNOWN;
-      Serial.println("CMI set to STOP");
+      my_log("CMI set to STOP");
 
       break;
   }
+}
+
+void wifi_loop() {
+  ws.update();
+
+  if (cpu->select_remote && (ws.getMode() != ControlMode::UNKNOWN)) {
+    set_control_mode(ws.getMode());
+    if (ws.getMode() == ControlMode::CONSTANT_LEVEL) {
+      setpoint_level_pc = ws.getLevelSetpoint();
+    }
+    if (ws.getMode() == ControlMode::CONSTANT_POWER) {
+      setpoint_power_w = ws.getPowerSetpoint();
+    }
+  }
+
+  if (ws.getAckErrors()) {
+    // handle error acknowledgement
+    ws.resetAck();
+  }
+
+  if (ws.hasNewClientTime()) {
+    uint32_t epoch = ws.getClientEpoch();
+    scheduler.setFromEpoch(epoch);
+    my_log("Time set to: " + String((unsigned int)time(NULL)));
+    is_time_set = true;
+  }
+
+  if (millis() - last_esp_send > esp_send_time){
+    ws.setMessage(tel_out.enc_outgoing_msg().c_str());
+    last_esp_send = millis();
+    my_log("WS send set");
+  }
+
+  if(ws.is_new_msg_avail()){
+    tel_inc.dec_incoming_msg(ws.get_new_msg());
+    handle_new_msg();
+  }
+
 }
 
 // Convenience overload used by the physical selector switch
@@ -493,16 +540,15 @@ void error_management() {
   // RTC timeout warning
   if (!is_time_set && millis() > 300000UL) {
     lamp_red = LampState::BLINK_SLOW;  // signal time-not-set
-    tel.cpu_time_not_set = true;
+    tel_out.errors.cpu_time_not_set = true;
   }
 
   float level = cpu->level_meassured_p;
 
   // Overfill guard: if level ever exceeds 101 %, drain back to 90 %
-  if (level > 1.01f) {
+  /*if (level > 1.01f) {
     set_control_mode(ControlMode::CONSTANT_LEVEL, 0.0f, 0.90f);
-    lamp_red = LampState::BLINK_FAST;
-    return;
+    lamp_red = LampState::BLINK_FAST; 
   }
 
   // Low-level guard: if below 5 %, start filling (or switch sub-mode)
@@ -513,9 +559,8 @@ void error_management() {
       set_control_mode(ControlMode::CONSTANT_LEVEL, 0.0f, NIGHT_DRAIN_SETPOINT);
     }
     lamp_red = LampState::BLINK_FAST;
-  }
+  }*/
 
-  ws.msgString = tel.enc_outgoing_msg();
   
 }
 
@@ -578,88 +623,59 @@ void logIOState(unsigned long now) {
   if (now - lastLog < 10000UL) return;
   lastLog = now;
 
-  Serial.println("──────────────── IO State ────────────────");
+  my_log("──────────────── IO State ────────────────");
 
   // Analog In
-  Serial.print("  water_temp       : ");
-  Serial.print(cpu->water_temp_dC, 2);
-  Serial.println(" °C");
-  Serial.print("  surround_temp    : ");
-  Serial.print(cpu->surround_temp_dC, 2);
-  Serial.println(" °C");
-  Serial.print("  water_pressure   : ");
-  Serial.print(cpu->water_preassure_bar, 3);
-  Serial.println(" bar");
-  Serial.print("  level_measured   : ");
-  Serial.print(cpu->level_meassured_p, 2);
-  Serial.println(" %");
-  Serial.print("  voltage          : ");
-  Serial.print(cpu->voltage_V, 2);
-  Serial.println(" V");
-  Serial.print("  current          : ");
-  Serial.print(cpu->current_A, 3);
-  Serial.println(" A");
-  Serial.print("  valve1_fb        : ");
-  Serial.print(cpu->valve1_fb_pc, 1);
-  Serial.println(" %");
-  Serial.print("  valve2_fb        : ");
-  Serial.print(cpu->valve2_fb_pc, 1);
-  Serial.println(" %");
+  my_log_pair("  water_temp        : ", cpu->water_temp_dC,       "°C");
+  my_log_pair("  surround_temp     : ", cpu->surround_temp_dC,    "°C");
+  my_log_pair("  water_pressure    : ", cpu->water_preassure_bar, "bar");
+  my_log_pair("  level_measured    : ", cpu->level_meassured_p,   "%");
+  my_log_pair("  voltage           : ", cpu->voltage_V,           "V");
+  my_log_pair("  current           : ", cpu->current_A,           "A");
+  my_log_pair("  valve1_fb         : ", cpu->valve1_fb_pc,        "%");
+  my_log_pair("  valve2_fb         : ", cpu->valve2_fb_pc,        "%");
 
   // Analog Out
-  Serial.print("  valve1_cv        : ");
-  Serial.print(cpu->valve1_cv_pc, 1);
-  Serial.println(" %");
-  Serial.print("  valve2_cv        : ");
-  Serial.print(cpu->valve2_cv_pc, 1);
-  Serial.println(" %");
+  my_log_pair("  valve1_cv         : ", cpu->valve1_cv_pc,        "%");
+  my_log_pair("  valve2_cv         : ", cpu->valve2_cv_pc,        "%");
 
   // Digital In
-  Serial.print("  ball_valve_open  : ");
-  Serial.println(cpu->ball_valve_open ? "1" : "0");
-  Serial.print("  ball_valve_closed: ");
-  Serial.println(cpu->ball_valve_closed ? "1" : "0");
-  Serial.print("  float_switch     : ");
-  Serial.println(cpu->float_switch_triggered ? "1" : "0");
-  Serial.print("  select_off       : ");
-  Serial.println(cpu->select_off ? "1" : "0");
-  Serial.print("  select_level     : ");
-  Serial.println(cpu->select_level ? "1" : "0");
-  Serial.print("  select_remote    : ");
-  Serial.println(cpu->select_remote ? "1" : "0");
+  my_log_pair("  ball_valve_open   : ", cpu->ball_valve_open          ? "1" : "0");
+  my_log_pair("  ball_valve_closed : ", cpu->ball_valve_closed        ? "1" : "0");
+  my_log_pair("  float_switch      : ", cpu->float_switch_triggered   ? "1" : "0");
+  my_log_pair("  select_off        : ", cpu->select_off               ? "1" : "0");
+  my_log_pair("  select_level      : ", cpu->select_level             ? "1" : "0");
+  my_log_pair("  select_remote     : ", cpu->select_remote            ? "1" : "0");
 
   // Digital Out
-  Serial.print("  ball_valve_cv    : ");
-  Serial.println(cpu->ball_valve_cv ? "1" : "0");
-  Serial.print("  lamp_green       : ");
-  Serial.println(cpu->lamp_green ? "1" : "0");
-  Serial.print("  lamp_red         : ");
-  Serial.println(cpu->lamp_red ? "1" : "0");
-  Serial.println();
+  my_log_pair("  ball_valve_cv     : ", cpu->ball_valve_cv            ? "1" : "0");
+  my_log_pair("  lamp_green        : ", cpu->lamp_green               ? "1" : "0");
+  my_log_pair("  lamp_red          : ", cpu->lamp_red                 ? "1" : "0");
+
   //Important variables
-  Serial.println("  Power Setpoint  " + String(setpoint_power_w));
-  Serial.println("  Level Setpoint  " + String(setpoint_level_pc));
+  my_log("  Power Setpoint  " + String(setpoint_power_w));
+  my_log("  Level Setpoint  " + String(setpoint_level_pc));
 
-  Serial.println("  CPU cmi:    " + controlModeStr(cmi));
-  Serial.println("  WEB cm:     " + controlModeStr(ws.getMode()));
+  my_log("  CPU cmi:    " + controlModeStr(cmi));
+  my_log("  WEB cm:     " + controlModeStr(ws.getMode()));
 
-  Serial.println("──────────────────────────────────────────");
+  my_log("──────────────────────────────────────────");
 }
 
 // ============================================================
 //  Setup
 // ============================================================
 void setup() {
-  Serial.begin(115200);
+  my_log_begin();
   while (millis() < 2000) {}
-  Serial.println("*** Opta MicroHydro Init ***");
+  my_log("*** Opta MicroHydro Init ***");
 
   // ── Opta controller ──────────────────────────────────────
   OptaController.begin();
-  Serial.println("*** Opta MicroHydro begun ***");
+  my_log("*** Opta MicroHydro begun ***");
 
   while (OptaController.getExpansionNum() == 0) {
-    Serial.println("Looking for expansions...");
+    my_log("Looking for expansions...");
     OptaController.update();
     delay(1000);
   }
@@ -669,7 +685,7 @@ void setup() {
     cpu = new opta_abs(0);  // pass index, not the object
   } else {
     while (true) {
-      Serial.println("NO Opta Analog found at position 0 — halted.");
+      my_log("NO Opta Analog found at position 0 — halted.");
       delay(2000);
     }
   }
@@ -679,7 +695,7 @@ void setup() {
 
   if ((unsigned int)time(NULL) > 1777127104) {  //probably still set
     is_time_set = true;
-    Serial.println("Time still set");
+    my_log("Time still set");
   }
 
   // ── Initial control mode ─────────────────────────────────
@@ -689,7 +705,7 @@ void setup() {
   wifi_setup();
 
   delay(2000);
-  Serial.println("*** Init complete ***");
+  my_log("*** Init complete ***");
 }
 
 // ============================================================
@@ -708,32 +724,9 @@ void loop() {
   //webserver stuff
   wifi_loop();
 
-  if (cpu->select_remote && (ws.getMode() != ControlMode::UNKNOWN)) {
-    set_control_mode(ws.getMode());
-    if (ws.getMode() == ControlMode::CONSTANT_LEVEL) {
-      setpoint_level_pc = ws.getLevelSetpoint();
-    }
-    if (ws.getMode() == ControlMode::CONSTANT_POWER) {
-      setpoint_power_w = ws.getPowerSetpoint();
-    }
-  }
-
-  if (ws.getAckErrors()) {
-    // handle error acknowledgement
-    ws.resetAck();
-  }
-
-  if (ws.hasNewClientTime()) {
-    uint32_t epoch = ws.getClientEpoch();
-    scheduler.setFromEpoch(epoch);
-    Serial.println("Time set to: " + String((unsigned int)time(NULL)));
-    is_time_set = true;
-  }
-
-
   //ws.setStatusShort("RUN");
   //ws.setStatusShortSetpoint("OK");
-  // ws.pushStatusMessage("some log line");
+  // ws.pushStatusMessage("some my_log line");
 
   error_management();
 

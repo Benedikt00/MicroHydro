@@ -36,7 +36,7 @@ long led_blink_time;
 bool led_State = LOW;
 
 const int LORA_SS = 5;
-const int LORA_DIO1 = 0;
+const int LORA_DIO1 = 16;
 const int LORA_RESET = 17;
 const int LORA_BUSY = 4;
 const int LORA_POWER = 22;

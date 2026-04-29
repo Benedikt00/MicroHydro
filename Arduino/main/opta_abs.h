@@ -1,5 +1,6 @@
 #pragma once
 #include <OptaBlue.h>
+#include <my_log.h>
 
 class opta_abs {
 private:
@@ -15,7 +16,7 @@ public:
     setup_io();
   }
 
-  //Analog in
+  //analog in
   float water_temp_dC{ 0.0 };
   float surround_temp_dC{ 0.0 };
   float water_preassure_bar{ 0.0 };
@@ -25,7 +26,7 @@ public:
   float valve1_fb_pc{ 0.0 };
   float valve2_fb_pc{ 0.0 };
 
-  //Analog Out
+  //analog Out
   float valve1_cv_pc = 1.0;
   float valve2_cv_pc = 1.0;
 
@@ -85,7 +86,7 @@ public:
     pinMode(LEDR, OUTPUT);
     pinMode(LEDB, OUTPUT);
 
-    // ----------- Analog Expansion (static API) -----------
+    // ----------- analog Expansion (static API) -----------
 
     // A1 (ch 0): Water temperature — 3-wire RTD, 1.2 mA
     AnalogExpansion::beginChannelAsRtd(OptaController,
@@ -139,17 +140,17 @@ public:
     // Verify DAC channels via a fresh getExpansion handle
     AnalogExpansion aexp = OptaController.getExpansion(device_index);
     if (!aexp.isChVoltageDac(4)) {
-      Serial.println("Channel 4 (Valve 1) NOT set as voltage DAC");
+      my_log("Channel 4 (Valve 1) NOT set as voltage DAC");
     } else {
-      Serial.println("Channel 4 (Valve 1) set OK");
+      my_log("Channel 4 (Valve 1) set OK");
     }
     if (!aexp.isChVoltageDac(7)) {
-      Serial.println("Channel 7 (Valve 2) NOT set as voltage DAC");
+      my_log("Channel 7 (Valve 2) NOT set as voltage DAC");
     } else {
-      Serial.println("Channel 7 (Valve 2) set OK");
+      my_log("Channel 7 (Valve 2) set OK");
     }
 
-    Serial.println("---- IO Set ----");
+    my_log("---- IO Set ----");
   }
 
   void set_nozzle_state(bool ball, float n1, float n2) {
@@ -187,7 +188,7 @@ public:
     select_remote = true;  //digitalRead(A5); todo
     current_A = adc_to_V(analogRead(A6));
 
-    // ----------- Analog Expansion (fresh handle each cycle) -----------
+    // ----------- analog Expansion (fresh handle each cycle) -----------
     AnalogExpansion aexp = OptaController.getExpansion(device_index);
 
     water_temp_dC = (-(1.0 / 100.0) * (50.0 * a - 10*sqrt(b * aexp.getRtd(0) + 25.0 * pow(a, 2.0) - 100.0 * b))) / b;
@@ -214,7 +215,7 @@ public:
     digitalWrite(D1, lamp_green);
     digitalWrite(D2, lamp_red);
 
-    // ----------- Analog Expansion -----------
+    // ----------- analog Expansion -----------
     AnalogExpansion aexp = OptaController.getExpansion(device_index);
 
     float v1_V = valve1_cv_pc / 10.0;

@@ -1,6 +1,6 @@
 // TimeScheduler.h
 #pragma once
-
+#include <my_log.h>
 // Maximum number of scheduled events
 #define MAX_SCHEDULES 8
 
@@ -21,7 +21,6 @@ public:
         set_time(epoch); 
         setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
         tzset();
-        Serial.println("Time set from epoche");
     }
 
     // ── Scheduling ────────────────────────────────────────────────────────────

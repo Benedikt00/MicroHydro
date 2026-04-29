@@ -1,4 +1,4 @@
-
+#include <my_log.h>
 
 class telegram_management {
 
@@ -7,7 +7,6 @@ public:
   class Errors {
   public:
     bool alarms[32];
-
 
     //General Errors
     bool cpu_not_reachable;
@@ -51,8 +50,6 @@ public:
 
     String alarm_msg;
 
-
-
     void
     fromAlarmString() {
       // Convert 10-char string to long
@@ -64,7 +61,7 @@ public:
       remoteNode_not_reachable = (alarmVal >> 1) & 1;
       gateway_not_reachable = (alarmVal >> 2) & 1;
       level_station_not_reachable = (alarmVal >> 3) & 1;
-      general_reserve4 = (alarmVal >> 4) & 1;
+      cpu_time_not_set = (alarmVal >> 4) & 1;
       general_reserve5 = (alarmVal >> 5) & 1;
       general_reserve6 = (alarmVal >> 6) & 1;
 
@@ -108,7 +105,7 @@ public:
       alarmVal |= ((long)remoteNode_not_reachable << 1);
       alarmVal |= ((long)gateway_not_reachable << 2);
       alarmVal |= ((long)level_station_not_reachable << 3);
-      alarmVal |= ((long)general_reserve4 << 4);
+      alarmVal |= ((long)cpu_time_not_set << 4);
       alarmVal |= ((long)general_reserve5 << 5);
       alarmVal |= ((long)general_reserve6 << 6);
 
@@ -180,17 +177,17 @@ public:
         tv.tv_sec = unix_incomeing;
         settimeofday(&tv, NULL);
 
-        Serial.println("Set time from 0 ");
+        my_log("Set time from 0 ");
       } else if (unix_incomeing == 0)
       {
-        Serial.println("Time incoming 0, returning");
+        my_log("Time incoming 0, returning");
         return;
       }
           //time drift
         else if (labs(unix_incomeing - getTime()) > MAX_TIME_DRIFT) {
         tv.tv_sec = unix_incomeing;
         settimeofday(&tv, NULL);
-        Serial.println("Set time from telegram");
+        my_log("Set time from telegram");
       }
       
       unix_time = unix_incomeing;
@@ -209,51 +206,51 @@ public:
       errors.fromAlarmString();
       ack_in = msg.substring(34, 35).toInt();
     } else {
-      Serial.println("Decoding Error, String length not ok");
+      my_log("Decoding Error, String length not ok");
     }
-    Serial.println("=== Decoded Message ===");
-    Serial.println("Raw msg:         " + msg);
-    Serial.println("MSG_LENGTH:      " + String(MSG_LENGTH));
-    Serial.println("msg.length():    " + String(msg.length()));
-    Serial.println("time (0,10):     " + msg.substring(0, 10));
-    Serial.println("device_id:       " + msg.substring(DEVICE_ID_SPOT, DEVICE_ID_SPOT + 1));
-    Serial.println("power (11,16):   " + msg.substring(11, 16));
-    Serial.println("pressure (16,20):" + msg.substring(16, 20));
-    Serial.println("level (20,23):   " + msg.substring(20, 23));
-    Serial.println("op_mode (23,24): " + msg.substring(23, 24));
-    Serial.println("alarm (24,34):   " + msg.substring(24, 34));
-    Serial.println("ack_in (34,35):  " + msg.substring(34, 35));
-    Serial.println("=======================");
+    my_log("=== Decoded Message ===");
+    my_log("Raw msg:         " + msg);
+    my_log("MSG_LENGTH:      " + String(MSG_LENGTH));
+    my_log("msg.length():    " + String(msg.length()));
+    my_log("time (0,10):     " + msg.substring(0, 10));
+    my_log("device_id:       " + msg.substring(DEVICE_ID_SPOT, DEVICE_ID_SPOT + 1));
+    my_log("power (11,16):   " + msg.substring(11, 16));
+    my_log("pressure (16,20):" + msg.substring(16, 20));
+    my_log("level (20,23):   " + msg.substring(20, 23));
+    my_log("op_mode (23,24): " + msg.substring(23, 24));
+    my_log("alarm (24,34):   " + msg.substring(24, 34));
+    my_log("ack_in (34,35):  " + msg.substring(34, 35));
+    my_log("=======================");
   }
 
   String enc_outgoing_msg() {
     char buf[MSG_LENGTH + 1];  //string terminator
 
     if (power > 999.9) {
-      Serial.println("Power " + String(power));
+      my_log("Power " + String(power));
       return "0";
     }
 
     if (preassure > 99.9) {
-      Serial.println("Preassure " + String(preassure));
+      my_log("Preassure " + String(preassure));
       return "0";
     }
 
     if (operating_mode > 9) {
-      Serial.println("operating Mode " + String(operating_mode));
+      my_log("operating Mode " + String(operating_mode));
       return "0";
     }
 
     if (level > 999){
-      Serial.println("level to high " + String(level));
+      my_log("level to high " + String(level));
       return "0";
     }
     if (out_reciever_id > 9){
-      Serial.println("Reviever ID to high " + String(level));
+      my_log("Reviever ID to high " + String(level));
       return "0";
     }
 
-    Serial.println(unix_time);
+    my_log(unix_time);
 
     snprintf(buf, sizeof(buf), "%010d%1d%05.1f%04.1f%03d%01d%-010s%01d",
              getTime(),
