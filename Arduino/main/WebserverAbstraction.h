@@ -260,10 +260,17 @@ struct DeviceState {
   uint32_t clientEpoch;
   bool timeUpdated;
   int ackErrors;
+  bool espSentUnknownMode_reinit;
+
+  float ki;
+  float kp;
+  bool set_power;
+  bool reset_pi;
+  bool newPiData;
 
   // Sensor endpoint
   float sensorTemperature;
-  bool msgSendFlag;        // set externally → sent in next response, then auto-cleared
+  bool msgSendFlag;  // set externally → sent in next response, then auto-cleared
   char msgString[SENSOR_STRING_LEN];
 
   DeviceState()
@@ -271,8 +278,9 @@ struct DeviceState {
       mode(ControlMode::UNKNOWN),
       powerSetpoint(0), levelSetpoint(0),
       clientEpoch(0), timeUpdated(false), ackErrors(0),
-      sensorTemperature(0.0f),
-      msgSendFlag(false) {
+      sensorTemperature(0.0f), espSentUnknownMode_reinit(false),
+      msgSendFlag(false),
+      ki(0.0), kp(0.0), set_power(false), reset_pi(false), newPiData(false) {
     for (int i = 0; i < STATUS_MSG_COUNT; i++) statusMessages[i][0] = '\0';
     statusShort[0] = '\0';
     statusShortSetpoint[0] = '\0';
@@ -399,7 +407,7 @@ public:
   ControlMode getMode() const {
     return _sd.mode;
   }
-  
+
   ControlMode setMode(ControlMode nextt) {
     _sd.mode = nextt;
     return _sd.mode;
@@ -447,7 +455,29 @@ public:
     return _sd.sensorTemperature;
   }
 
+  bool hasNewPiData() {
+    if (_sd.newPiData) {
+      _sd.newPiData = false;
+      return true;
+    }
+    return false;
+  }
 
+  float getPValue() {
+    return _sd.kp;
+  }
+
+  float getIValue() {
+    return _sd.ki;
+  }
+
+  bool isForPowerControl() {
+    return _sd.set_power;
+  }
+
+  bool resetIntegral() {
+    return _sd.reset_pi;
+  }
 
   // Send flag + string — set externally, consumed on next sensor poll, then cleared
   void setMessage(const char* msg, bool activate = true) {
@@ -466,12 +496,19 @@ public:
     return _sd.msgString;
   }
 
-  bool is_new_msg_avail(){
+  bool is_new_msg_avail() {
     return rec_new_msg;
-      
   }
 
-  String get_new_msg(){
+  bool is_ESP_reiint() {
+    if (_sd.espSentUnknownMode_reinit) {
+      _sd.espSentUnknownMode_reinit = false;
+      return true;
+    }
+    return false;
+  }
+
+  String get_new_msg() {
     rec_new_msg = false;
     return new_inc_msg;
   }
@@ -553,11 +590,17 @@ private:
       if (_methodStr == HTTP_GET) {
         _sendApiState();
       } else if (_methodStr == HTTP_POST) {
+        my_log("api post here");
         if (_body.length()) _parseControlRequest();
         _sendApiState();
       } else {
         _badRequest();
       }
+      _connState = ConnState::DONE;
+
+    } else if (_pathStr == "/api/pi") {
+      if (_methodStr == HTTP_POST) _handlePiValPost();
+      else _badRequest();
       _connState = ConnState::DONE;
 
       // ── / (HMI or status page) ─────────────────────────────────────────────────
@@ -592,9 +635,30 @@ private:
       return;
     }
 
-    if (_req.containsKey("temperature"))
+    if (_req.containsKey("temperature")) {
       _sd.sensorTemperature = (float)_req["temperature"];
+    }
+    // checks if control mode unknown and time not set -> sets reeint
+    if (_req.containsKey("message")) {
+      String rq_msg = String((const char*)_req["message"]);
+      my_log(rq_msg);
 
+      if (rq_msg.length() >= 20) {
+        if (rq_msg[23] == '0') {  //cm unknown
+          my_log("CM unknown");
+
+          for (int i = 0; i <= 9; i++) {
+            if (rq_msg[i] != '0') {
+              break;
+            }
+            if (i == 9) {
+              _sd.espSentUnknownMode_reinit = true;
+              my_log("Reeint of esp");
+            }
+          }
+        }
+      }
+    }
     // Build response
     _res.clear();
     _res["power"] = _sd.power;
@@ -642,10 +706,32 @@ private:
       "{\"status\":\"ok\"}\n");
   }
 
+  //{"ki": 0.3, "kp": 30.0, "for_power": true, "reset": true}
+  // ── POST /api/pi ────────────────────────────────────────────────────────
+  void _handlePiValPost() {
+    _req.clear();
+    if (!deserializeJson(_req, _body) && _req.containsKey("ki") && _req.containsKey("kp") && _req.containsKey("for_power") && _req.containsKey("reset")) {
+      _sd.ki = (float)_req["ki"];
+      _sd.kp = (float)_req["kp"];
+      _sd.set_power = (bool)_req["for_power"];
+      _sd.reset_pi = (bool)_req["reset"];
+    }
+
+    _sd.newPiData = true;
+
+    _client.print(
+      "HTTP/1.1 200 OK\r\n"
+      "Connection: close\r\n"
+      "Content-Type: application/json\r\n"
+      "Content-Length: 15\r\n"
+      "\r\n"
+      "{\"status\":\"ok\"}\n");
+  }
+
   bool rec_new_msg = false;
   String new_inc_msg = "";
 
-  
+
   // ── Parse POST /api ───────────────────────────────────────────────────────
   void _parseControlRequest() {
     _req.clear();
@@ -655,17 +741,16 @@ private:
       return;
     }
 
-    if (_req.containsKey("message")){
+    if (_req.containsKey("message")) {
       new_inc_msg = String((const char*)_req["message"]);
     }
 
     rec_new_msg = true;
-    
   }
 
   // ── GET /api — send JSON state ────────────────────────────────────────────
   void _sendApiState() {
-   
+
     _res.clear();
     JsonArray msgs = _res.createNestedArray("statusMessages");
     for (int i = 0; i < STATUS_MSG_COUNT; i++) msgs.add(_sd.statusMessages[i]);

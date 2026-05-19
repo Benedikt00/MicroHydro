@@ -61,7 +61,7 @@ LoRaCom lora_module(LORA_SS, LORA_DIO1, LORA_RESET, LORA_BUSY);
 
 lcd_management display;
 unsigned long lastUpdateLcd = 0;
-const unsigned long LCD_RATE = 5000UL;   // refresh every 5 s
+const unsigned long LCD_RATE = 5000UL;  // refresh every 5 s
 
 telegram_management tel_inc;
 telegram_management tel_out;
@@ -81,6 +81,7 @@ SenderState senderState = SEND;
 
 unsigned long lastSendTime = 0;
 unsigned long lastRecieveTime = 0;
+unsigned long lastReconAttempt{0};
 //bool need_to_respond_to_rem_nod = false;
 int packetCounter = 0;
 
@@ -100,6 +101,8 @@ int LORA_REPLY_TIME = 500;
 //bool lora_set_recieving = true;
 bool lora_send_reply = false;
 
+bool init_lora_con_to_rem_nd_ok = false;
+
 long last_msg = 0;
 
 void ackErrors() {
@@ -117,9 +120,9 @@ String payload;
 char buf[STATUS_MSG_LEN];
 
 
-void errorManagement(){
-  if (tel_out.errors.gw_lora_fail){
-    display.status = "LoRa Fail...";
+void errorManagement() {
+  if (tel_out.errors.gw_lora_fail) {
+    display.status = "LoRa Fehler...";
   }
 }
 
@@ -129,21 +132,16 @@ void loracom() {
       {
         String msg = lora_module.receive();
 
-        if (tel_out.errors.gw_lora_fail || tel_out.errors.remoteNode_not_reachable) {
-          senderState = ERROR;
-          break;
-        }
-
         //break recieve after send to avoid echo
         if (millis() - lastSendTime < LORA_AFTER_SEND_TIMEOUT) {
-          if (msg != ""){
+          if (msg != "") {
             my_log("^^^^^ Trown away");
           }
           break;
         }
 
         //set send to reply after ack and timeoute
-        if (lora_send_reply && !waitingForAck && (millis() - lastSendTime >= LORA_REPLY_TIME)){
+        if (lora_send_reply && !waitingForAck && (millis() - lastSendTime >= LORA_REPLY_TIME)) {
           my_log("Sending reply msg");
           senderState = SEND;
           lora_send_reply = false;
@@ -167,6 +165,7 @@ void loracom() {
           ws->pushStatusMessage(buf);
 
           waitingForAck = false;
+          init_lora_con_to_rem_nd_ok = true;
           break;
         }
 
@@ -181,17 +180,18 @@ void loracom() {
             retries_used += 1;
           } else {  //errors when retrys exceeded
             retries_used = 0;
-            senderState = ERROR;
-
             my_log("Lora Max retries exceedet");
+            display.error("LoRa wait to re con");
+            lastReconAttempt = millis();
             tel_out.errors.remoteNode_not_reachable = true;
             snprintf(buf, sizeof(buf), "Lora Max retries exceedet");
             ws->pushStatusMessage(buf);
             waitingForAck = false;
+            senderState = ERROR;
           }
         }
-        //Handle NEw message recieve
-        if (msg != "") {  
+        //Handle New message recieve
+        if (msg != "") {
           my_log("New msg " + String(msg.length()));
 
           if (msg.length() == tel_inc.MSG_LENGTH) {  //right len
@@ -210,6 +210,8 @@ void loracom() {
               waitingToAck = true;
               lora_send_reply = true;
               tel_out.errors.remoteNode_not_reachable = false;
+              telegram_handling();
+              hmi_write_state();
             }
           }
         }
@@ -219,7 +221,7 @@ void loracom() {
     case SEND:
       {
         //return if error
-        if (tel_out.errors.gw_lora_fail || tel_out.errors.remoteNode_not_reachable) {
+        if (tel_out.errors.gw_lora_fail) {
           senderState = ERROR;
           break;
         }
@@ -227,7 +229,7 @@ void loracom() {
         if (waitingToAck && (millis() - lastRecieveTime >= LORA_WAIT_TO_ACK_TIMEOUT)) {
           payload = "ACK";
           waitingToAck = false;
-          my_log("Sending ack after: " +  String(lastRecieveTime) + " " +  String(millis() - lastRecieveTime) + " TO: " + String(LORA_WAIT_TO_ACK_TIMEOUT));
+          my_log("Sending ack after: " + String(lastRecieveTime) + " " + String(millis() - lastRecieveTime) + " TO: " + String(LORA_WAIT_TO_ACK_TIMEOUT));
 
         } else {
           //set message
@@ -269,10 +271,14 @@ void loracom() {
         }
 
         break;
-        if (tel_out.errors.remoteNode_not_reachable && !(senderState == RECIEVING)){
-            senderState = RECIEVING;
-            my_log("Set Recieve from Error");
-            break;
+        if (tel_out.errors.remoteNode_not_reachable) {
+          if ((millis() - lastReconAttempt) > 30000){
+            senderState = SEND;
+          my_log("Set Recieve from Error");
+          display.error = "LoRa try to re con";
+          break;
+          }
+          
         }
       }
   }
@@ -296,11 +302,12 @@ void WIFI_init() {
 
   IPAddress ip = WiFi.softAPIP();  // typically 192.168.4.1
   my_log("[AP] Network : " + String(AP_SSID));
-  if (strlen(AP_PASS) > 0)
+  if (strlen(AP_PASS) > 0) {
     my_log("[AP] Password: " + String(AP_PASS));
-  else
+  } else {
     my_log("[AP] Password: (open network)");
-  my_log("[AP] IP      : " + ip.toString());
+    my_log("[AP] IP      : " + ip.toString());
+  }
 
   // ── Instantiate webserver ─────────────────────────────────────────────
   ws = new WebserverAbstraction(ip, AP_PORT);
@@ -328,7 +335,7 @@ void WIFI_loop() {
   float pwrSP = ws->getPowerSetpoint();
   int lvlSP = ws->getLevelSetpoint();
 
-  
+
 
   // ── Periodic my_log ──────────────────────────────────────────────────────
   if (ws->getAckErrors()) {
@@ -337,6 +344,36 @@ void WIFI_loop() {
   }
 }
 
+void telegram_handling(){
+    tel_out.operating_mode = tel_inc.operating_mode;
+}
+
+const String controlModeStr(int m) {
+  switch (m) {
+    case 0: return "UNBEKANNT";
+    case 1: return "STOP";
+    case 2: return "LEISTUNG";
+    case 3: return "PEGEL";
+    case 4: return "LEISTUNG NACHT";
+    case 5: return "PEGEL NACHT";
+    case 6: return "FUELLEN";
+    default: return "UNBEKANNT";
+  }
+}
+
+void hmi_write_state(){
+  display.power = tel_inc.power;
+  ws->setPower(tel_inc.power);
+
+  display.level = tel_inc.level_pc;
+  ws->setLevel(tel_inc.level_pc);
+
+  display.status = String("Regelart: " + controlModeStr(tel_inc.operating_mode));
+  ws->setStatusShort(controlModeStr(tel_inc.operating_mode).c_str());
+
+  
+
+}
 
 void setup() {
   my_log_begin();
@@ -370,11 +407,11 @@ void setup() {
   tel_out.out_reciever_id = LORA_REMOTE_ID;
   tel_inc.out_reciever_id = LORA_REMOTE_ID;
 
-  if (lora_module.loraError){
-    display.status = "LoRa error..";
+  if (lora_module.loraError) {
+    display.status = "LoRa fehler..";
     tel_out.errors.gw_lora_fail = true;
-  }else{
-    display.status = "LoRa Connecting...";
+  } else {
+    display.status = "LoRa verbinden...";
   }
   display.update();
   /*
@@ -410,6 +447,11 @@ void loop() {
     senderState = SEND;
   }*/
 
+  if (init_lora_con_to_rem_nd_ok && (tel_inc.operating_mode == 0)) {
+    display.status = "LoRa verbunden...";
+    display.error = "Warte auf CPU...";
+  }
+
   if (millis() - lastUpdateLcd > LCD_RATE) {
     lastUpdateLcd = millis();
     display.update();
@@ -421,5 +463,3 @@ void loop() {
   }
   digitalWrite(led_onboard, led_State);
 };
-
-

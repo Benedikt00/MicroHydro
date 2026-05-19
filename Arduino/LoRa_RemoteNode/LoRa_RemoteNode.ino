@@ -54,7 +54,10 @@ const char* AP_SSID = "MicroHydro";
 const char* AP_PASS = "Einstein123";  // set "" for an open (no password) AP
 
 const int WIFI_MAX_CONNECTION_TIME = 3000;
-const int WIFI_POLLING_RATE = 3000;  //time after which cpu is requested again
+const int WIFI_RECONNECTION_TIME = 5000;  //try to reconnect every 5 seconds
+const int WIFI_POLLING_RATE = 3000;       //time after which cpu is requested again
+unsigned long last_con_time = millis();
+
 int last_wifi_req{ 0 };
 
 static const IPAddress AP_IP(192, 168, 0, thisLORA_ID);
@@ -67,7 +70,7 @@ telegram_management tel;
 
 lcd_management display;
 unsigned long lastUpdate = 0;
-const unsigned long LCD_RATE = 3000UL;   // refresh every 1 s
+const unsigned long LCD_RATE = 3000UL;  // refresh every 3 s
 
 float measuredPower = 0.0f;
 int measuredLevel = 0;
@@ -137,11 +140,6 @@ void loracom() {
       {
         String msg = lora_module.receive();
 
-        if (tel.errors.gw_lora_fail || tel.errors.remoteNode_not_reachable) {
-          senderState = ERROR;
-          break;
-        }
-
         //break recieve after send to avoid echo
         if (millis() - lastSendTime < LORA_AFTER_SEND_TIMEOUT) {
           if (msg != "") {
@@ -183,14 +181,14 @@ void loracom() {
           //Telegram repetition when not acknowledged
           if (retries_used < LORA_MESSAGE_RETRYS) {
             senderState = SEND;
-            retries_used +=1;
+            retries_used += 1;
 
           } else {  //errors when retrys exceeded
             retries_used = 0;
             senderState = ERROR;
 
             my_log("Lora Max retries exceedet");
-            tel.errors.remoteNode_not_reachable = true;
+            tel.errors.gateway_not_reachable = true;
             snprintf(buf, sizeof(buf), "Lora Max retries exceedet, listening");
             waitingForAck = false;
 
@@ -215,7 +213,7 @@ void loracom() {
               waitingToAck = true;
               //lora_set_recieving = true;
               wait_for_lora_round_trip = false;
-              direct_send_cpu = true; 
+              direct_send_cpu = true;
             }
           }
         }
@@ -225,7 +223,7 @@ void loracom() {
     case SEND:
       {
         //return if error
-        if (tel.errors.gw_lora_fail) {
+        if (tel.errors.gateway_not_reachable) {
           senderState = ERROR;
           break;
         }
@@ -266,7 +264,7 @@ void loracom() {
 
     case ERROR:
       {
-        if (!tel.errors.rn_lora_ini_fail && !tel.errors.gateway_not_reachable) {
+        if (lora_module.loraError && !tel.errors.rn_lora_ini_fail && !tel.errors.gateway_not_reachable) {
           lora_module.init();
           if (!lora_module.loraError) {
             tel.errors.remoteNode_not_reachable = false;
@@ -275,14 +273,17 @@ void loracom() {
           }
           break;
         }
-        if (tel.errors.gateway_not_reachable){
-            senderState = RECIEVING;
-            my_log("Set Recieve from Error");
-            break;
+
+        if (tel.errors.gateway_not_reachable) {
+          senderState = RECIEVING;
+          my_log("Set Recieve from Error");
+          display.error = "LoRa w for re con";
+          break;
         }
       }
   }
 }
+
 
 int BMP_init() {
   Wire.begin();
@@ -311,7 +312,7 @@ int BMP_init() {
 
 void WIFI_loop() {
   if (cpu_api.wifiConnected) {
-    
+
     StaticJsonDocument<64> reqDoc;
     StaticJsonDocument<128> resDoc;
 
@@ -327,7 +328,7 @@ void WIFI_loop() {
 
       // ── POST and parse response ─────────────────────────────────────────
       String response = cpu_api.httpPost(ESP_API_PATH, payload.c_str());
-      if (response.length() == 0) return;
+      if (response.length() == 0) cpu_api.wifiConnected = false;
 
       DeserializationError err = deserializeJson(resDoc, response);
       if (err) {
@@ -339,6 +340,7 @@ void WIFI_loop() {
       bool sendFlag = resDoc["sendFlag"] | false;
       const char* message = resDoc["message"] | "";
       const char* status = resDoc["status"] | "";
+      last_con_time = millis();
 
       Serial.printf("[WIFI] power=%.1f  sendFlag=%d  msg=%s\n", power, sendFlag, message);
 
@@ -349,14 +351,14 @@ void WIFI_loop() {
       //olta jaaa, message zu versenden
       if (sendFlag && strlen(message) > 0) {
         my_log("[WIFI] Message from Opta, ready to send: " + String(message));
-        // handle message 
+        // handle message
         tel.dec_incoming_msg(message);
         senderState = SEND;
         wait_for_lora_round_trip = true;
         round_trip_start = millis();
       }
     }
-    if (direct_send_cpu){
+    if (direct_send_cpu) {
       direct_send_cpu = false;
 
       // ── Build payload ───────────────────────────────────────────────────
@@ -375,8 +377,16 @@ void WIFI_loop() {
         return;
       }
     }
-  }else{
-    //todo reconnect handling
+  } else {
+    if (millis() - last_con_time > WIFI_RECONNECTION_TIME) {
+      last_con_time = millis();
+      if (cpu_api.connectWiFi(5000)) {
+        my_log("WiIfi reinit ok");
+      } else {
+        my_log("!!!! WiIfi reinit failed !!!!!");
+        display.error = "Wifi failed";
+      }
+    }
   }
 };
 
@@ -419,10 +429,10 @@ void setup() {
     delay(2000);
   }
 
-   
-  
-    
-/*
+
+
+
+  /*
     tel.dec_incoming_msg(incomeing);
 
     Serial.print(String(tel.operating_mode));
@@ -443,14 +453,13 @@ void loop() {
 
   loracom();
 
-  if (!wait_for_lora_round_trip){
+  if (!wait_for_lora_round_trip) {
     WIFI_loop();
   }
 
-  if (millis() - round_trip_start > round_trip_time_max_ms){
+  if (millis() - round_trip_start > round_trip_time_max_ms) {
     wait_for_lora_round_trip = false;
     waitingToAck = false;
-    
   }
 
   digitalWrite(led_onboard, led_State);
@@ -459,5 +468,4 @@ void loop() {
     led_blink_time = millis();
     led_State = !led_State;
   }
-
 };

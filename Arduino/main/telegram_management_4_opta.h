@@ -140,6 +140,9 @@ public:
       alarmVal |= ((long)cpu_reserve11 << 30);
 
       // Pad to exactly 10 characters with leading zeros
+      if (alarmVal < 0) {
+        alarmVal = alarmVal * -1;
+      }
       String result = String(alarmVal);
       while (result.length() < 10) result = "0" + result;
 
@@ -173,25 +176,24 @@ public:
 
 
   void time_management(long unix_incomeing) {
-      if ((unix_incomeing != 0) && (unix_time == 0)) {
-        tv.tv_sec = unix_incomeing;
-        settimeofday(&tv, NULL);
+    if ((unix_incomeing != 0) && (unix_time == 0)) {
+      tv.tv_sec = unix_incomeing;
+      settimeofday(&tv, NULL);
 
-        my_log("Set time from 0 ");
-      } else if (unix_incomeing == 0)
-      {
-        my_log("Time incoming 0, returning");
-        return;
-      }
-          //time drift
-        else if (labs(unix_incomeing - getTime()) > MAX_TIME_DRIFT) {
-        tv.tv_sec = unix_incomeing;
-        settimeofday(&tv, NULL);
-        my_log("Set time from telegram");
-      }
-      
-      unix_time = unix_incomeing;
-    };
+      my_log("Set time from 0 ");
+    } else if (unix_incomeing == 0) {
+      my_log("Time incoming 0, returning");
+      return;
+    }
+    //time drift
+    else if (labs(unix_incomeing - getTime()) > MAX_TIME_DRIFT) {
+      tv.tv_sec = unix_incomeing;
+      settimeofday(&tv, NULL);
+      my_log("Set time from telegram");
+    }
+
+    unix_time = unix_incomeing;
+  };
 
   void dec_incoming_msg(const String &msg) {
 
@@ -226,42 +228,41 @@ public:
   String enc_outgoing_msg() {
     char buf[MSG_LENGTH + 1];  //string terminator
 
-    if (power > 999.9) {
+    if ((power > 999.9) || (power < 0)) {
       my_log("Power " + String(power));
-      return "0";
+      power = 0;
     }
 
-    if (preassure > 99.9) {
+    if ((preassure > 99.9) || (preassure < 0)) {
       my_log("Preassure " + String(preassure));
-      return "0";
+      preassure = 0;
     }
 
-    if (operating_mode > 9) {
+    if ((operating_mode > 9) || (operating_mode < 0)) {
       my_log("operating Mode " + String(operating_mode));
-      return "0";
+      operating_mode = 0;
     }
 
-    if (level > 999){
-      my_log("level to high " + String(level));
-      return "0";
-    }
-    if (out_reciever_id > 9){
-      my_log("Reviever ID to high " + String(level));
-      return "0";
+    if ((level > 999) || (level < 0)) {
+      my_log("level out of bounds " + String(level));
+      level = 0;
     }
 
-    my_log(unix_time);
+    if ((out_reciever_id > 9) || (out_reciever_id < 0)) {
+      my_log("Reviever ID to high " + String(out_reciever_id));
+      out_reciever_id = 0;
+    }
 
-    snprintf(buf, sizeof(buf), "%010d%1d%05.1f%04.1f%03d%01d%-010s%01d",
+    snprintf(buf, sizeof(buf), "%010d%1d%05.1f%04.1f%03d%01d%010s%01d",
              getTime(),
-             out_reciever_id, 
+             out_reciever_id,
              power,
              preassure,
              level,
              operating_mode,
              errors.toAlarmString().c_str(),
              ack_out);
-             
+
     return String(buf);
   }
 };

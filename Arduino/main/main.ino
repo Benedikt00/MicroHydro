@@ -2,6 +2,8 @@
 //  MicroHydro Control Firmware
 //  Arduino / Opta platform
 // ============================================================
+#define LOG_PLATFORM_OPTA
+
 #include <OptaBlue.h>
 #include "opta_abs.h"
 #include "WebserverAbstraction.h"
@@ -12,23 +14,29 @@
 #include <WiFiServer.h>
 //#include "opta_wifi_ap.h"
 #include <ArduinoJson.h>
-#define LOG_PLATFORM_OPTA
 #include <my_log.h>
-//todo vermutlich wird der setpoiint geändert und nicht filling ect für day night mal schaun
+#include <value_monitoring.h>
+
+// Fill rate: 1 l/s 3600 l/h
+// Drain rate 3 l/s 10800 l/h
+// Resarvuar: 8000l
+// Fill w/o drain: 2.2h, fill w/ normal drain (1l/s) -> inf,
+// Max Drain w/ normal fill: 0.7h
 
 // ────────────────────────────────────────────────────────────
 //  Network / AP configuration
 // ────────────────────────────────────────────────────────────
 // ── AP credentials ────────────────────────────────────────────────────────────
-static const char* AP_SSID = "MicroHydro";
+
 static const char* AP_PASSWORD = "Einstein123";
+static const char* AP_SSID = "MicroHydro";
 static const uint8_t AP_CHANNEL = 6;
 
 // ── Server instance ───────────────────────────────────────────────────────────
 static const uint16_t WS_PORT = 80;
 static IPAddress AP_IP(192, 168, 3, 1);
-const int esp_send_time = 30000;
-unsigned long last_esp_send{0};
+const int esp_send_time = 300000;
+unsigned long last_esp_send{ 0 };
 
 // ── Telegram management ───────────────────────────────────────────────────────────
 telegram_management tel_inc;
@@ -39,25 +47,31 @@ telegram_management tel_out;
 // ────────────────────────────────────────────────────────────
 static const int DAY_START_HOUR = 8;
 static const int DAY_END_HOUR = 20;
-static const float DAY_FILL_SETPOINT = 0.90f;     // fraction 0–1
-static const float NIGHT_DRAIN_SETPOINT = 0.30f;  // fraction 0–1
+static const float DAY_FILL_SETPOINT = 90.0f;
+static const float NIGHT_DRAIN_SETPOINT = 10.0f;
 
 // ────────────────────────────────────────────────────────────
 //  Control parameters
 // ────────────────────────────────────────────────────────────
 static const float LEVEL_PI_DEADBAND = 0.04f;  // ±4 % of full scale
-static const int PI_PERIOD_S = 30;             // PI update interval [s]
 
-static const float NORMAL_FILL_RATE_PPH = 0.02f;  // fraction per hour
-static const float MAX_FILL_RATE_PPH = 0.02f;
-static const float NORMAL_DRAIN_RATE_PPH = 0.02f;
-static const float MAX_DRAIN_RATE_PPH = 0.017f;
+static const int LEVEL_PI_PERIOD_S = 30;  // PI update interval [s]
+static const int POWER_PI_PERIOD_S = 3;   // PI update interval [s]
 
-// PI gains for the power / level controller
-static const float KP_LEVEL = 0.05f;  // proportional gain
-static const float KI_LEVEL = 0.01f;  // integral gain
-static const float I_MAX = 80.0f;     // anti-windup clamp (%)
-static const float I_MIN = -80.0f;
+static const float NORMAL_FILL_RATE_PPH = 40.0f;  // fraction per hour
+static const float NORMAL_DRAIN_RATE_PPH = 130.0f;
+
+// PI gains for the power controller
+static float KP_POWER = 0.7f;   // proportional gain
+static float KI_POWER = 0.03f;  // integral gain
+static float IP_MAX = 300.0f;   // anti-windup clamp (W)
+static float IP_MIN = -300.0f;
+
+// PI gains for the level controller
+static float KP_LEVEL = 0.05f;      // proportional gain
+static float KI_LEVEL = 0.01f;      // integral gain
+static const float IL_MAX = 80.0f;  // anti-windup clamp (%)
+static const float IL_MIN = -80.0f;
 
 // Nozzle / turbine parameters
 //
@@ -73,7 +87,7 @@ static const float I_MIN = -80.0f;
 //    BALL_POWER_W        = ONE_NOZZLE_POWER_W * 0.80  (fixed when open)
 //    MAX_POWER_W         = 2 * ONE_NOZZLE_POWER_W + BALL_POWER_W
 //
-static const float ONE_NOZZLE_POWER_W = 110.0f;                              // W — tune to your turbine
+static const float ONE_NOZZLE_POWER_W = 120.0f;                              // W — tune to your turbine
 static const float NOZZLE_EFFICIENT_PC = 0.80f;                              // prop. nozzle sweet-spot
 static const float BALL_POWER_W = ONE_NOZZLE_POWER_W * NOZZLE_EFFICIENT_PC;  // 160 W
 static const float MAX_POWER_W = 2.0f * ONE_NOZZLE_POWER_W + BALL_POWER_W;   // 560 W
@@ -103,6 +117,11 @@ TimeScheduler scheduler;
 opta_abs* cpu = nullptr;
 WebserverAbstraction ws(AP_IP, WS_PORT);
 
+//Value monitoring
+monitor_window monitor_valve1(0.0, 100.0, 5, 90000);
+monitor_window monitor_valve2(0.0, 100.0, 5, 90000);
+monitor_ball_valve monitor_bv(60000);
+
 // ────────────────────────────────────────────────────────────
 //  Runtime state
 // ────────────────────────────────────────────────────────────
@@ -114,7 +133,7 @@ ControlMode cmi_sec = ControlMode::UNKNOWN;  // secondary (night sub-mode)
 //ControlMode cmi_previous = ControlMode::UNKNOWN;  // check if changed
 
 float setpoint_power_w = 0.0f;   // [W]
-float setpoint_level_pc = 0.0f;  // fraction 0–1
+float setpoint_level_pc = 0.0f;  //  0–100
 
 LampState lamp_red = LampState::OFF;
 LampState lamp_green = LampState::OFF;
@@ -124,8 +143,10 @@ LampState lamp_green = LampState::OFF;
 // ────────────────────────────────────────────────────────────
 float lc_indirect_setpoint = 0.5f;  // internal ramp target
 bool lc_indirect_active = false;
-float lc_integrator = 0.0f;
+float lc_integrator{ 0.0f };  //integrator part for level
+float pc_integrator{ 0.0f };  //power
 unsigned long lc_last_update_ms = 0;
+unsigned long pc_last_update_ms = 0;
 
 // ────────────────────────────────────────────────────────────
 //  Api things
@@ -148,26 +169,28 @@ static int clampi(int v, int lo, int hi) {
 void on_day_start() {
   is_day = true;
   // If we were in a night mode, begin filling the reservoir
-  if (cmi == ControlMode::CONSTANT_POWER_NIGHT || cmi == ControlMode::CONSTANT_LEVEL_NIGHT) {
+  /*if (cmi == ControlMode::CONSTANT_POWER_NIGHT || cmi == ControlMode::CONSTANT_LEVEL_NIGHT) {
     cmi_sec = ControlMode::FILLING;
-  }
+  }*/
 }
 
 void on_night_start() {
   is_day = false;
-  if (cmi == ControlMode::CONSTANT_POWER_NIGHT) {
+  /*if (cmi == ControlMode::CONSTANT_POWER_NIGHT) {
     cmi_sec = ControlMode::CONSTANT_POWER;
   }
   if (cmi == ControlMode::CONSTANT_LEVEL_NIGHT) {
     cmi_sec = ControlMode::CONSTANT_LEVEL;
-  }
+  }*/
 }
 
-void handle_new_msg(){
-  if (tel_inc.operating_mode == 0){ //doudel tut reinitialisieren
-    ws.setMessage(tel_out.enc_outgoing_msg().c_str());
-    last_esp_send = millis();
-    my_log("WS send set after reiint of subcomponent");
+void handle_new_msg() {
+  if (tel_inc.operating_mode == 0) {  //doudel tut reinitialisieren
+    if (cmi != ControlMode::UNKNOWN) {
+      ws.setMessage(tel_out.enc_outgoing_msg().c_str());
+      last_esp_send = millis();
+      my_log("WS send set after reiint of subcomponent");
+    }
   }
   //todo, inc to out
 }
@@ -196,7 +219,6 @@ void wifi_setup() {
   ws.begin();
 }
 
-
 // ============================================================
 //  Control-mode setter
 //  Call this from the hardware selector, the webserver, or
@@ -209,6 +231,8 @@ void set_control_mode(ControlMode requested_mode,
   if (cmi == requested_mode) {
     return;
   }
+
+  reset_pi_controllers();
 
   // Resolve UNKNOWN → STOP
   if (requested_mode == ControlMode::UNKNOWN) {
@@ -235,21 +259,19 @@ void set_control_mode(ControlMode requested_mode,
     case ControlMode::CONSTANT_POWER:
     case ControlMode::CONSTANT_POWER_NIGHT:
       cmi = requested_mode;
-      setpoint_power_w = (power_setpoint_w > 0.0f) ? power_setpoint_w : 100.0f;
-      cmi_sec = is_day ? ControlMode::FILLING : ControlMode::CONSTANT_POWER;  //todo check if needs to be filling
+      //setpoint_power_w = (power_setpoint_w > 0.0f) ? power_setpoint_w : 100.0f;  //todo
+      //cmi_sec = is_day ? ControlMode::FILLING : ControlMode::CONSTANT_POWER;     //todo check if needs to be filling
       my_log("CMI set to CONSTANT_POWER/NIGHT");
       break;
 
     case ControlMode::CONSTANT_LEVEL:
     case ControlMode::CONSTANT_LEVEL_NIGHT:
       cmi = requested_mode;
-      // Use provided setpoint, or capture the current level
       setpoint_level_pc = (level_setpoint_pc >= 0.0f)
                             ? level_setpoint_pc
                             : cpu->level_meassured_p;
       lc_indirect_setpoint = setpoint_level_pc;
-      lc_integrator = 0.0f;
-      cmi_sec = is_day ? ControlMode::FILLING : ControlMode::CONSTANT_LEVEL;  //todo check if needs to be filling
+      //cmi_sec = is_day ? ControlMode::FILLING : ControlMode::CONSTANT_LEVEL;  //todo check if needs to be filling
       my_log("CMI set to CONSTANT_LEVEL/NIGHT");
 
       break;
@@ -273,8 +295,14 @@ void set_control_mode(ControlMode requested_mode,
 void wifi_loop() {
   ws.update();
 
-  if (cpu->select_remote && (ws.getMode() != ControlMode::UNKNOWN)) {
-    set_control_mode(ws.getMode());
+  if (cpu->select_remote) {
+    if ((ws.getMode() == ControlMode::UNKNOWN)) {
+      set_control_mode(ControlMode::STOP);
+
+    } else {
+      set_control_mode(ws.getMode());
+    }
+
     if (ws.getMode() == ControlMode::CONSTANT_LEVEL) {
       setpoint_level_pc = ws.getLevelSetpoint();
     }
@@ -295,17 +323,44 @@ void wifi_loop() {
     is_time_set = true;
   }
 
-  if (millis() - last_esp_send > esp_send_time){
-    ws.setMessage(tel_out.enc_outgoing_msg().c_str());
-    last_esp_send = millis();
-    my_log("WS send set");
+  if (millis() - last_esp_send > esp_send_time) {
+    set_lora_send();
   }
 
-  if(ws.is_new_msg_avail()){
+  if (ws.is_new_msg_avail()) {
     tel_inc.dec_incoming_msg(ws.get_new_msg());
     handle_new_msg();
   }
 
+  if (ws.is_ESP_reiint()){
+    set_lora_send();
+  }
+
+  if (ws.hasNewPiData()) {
+    if (ws.isForPowerControl()) {
+      KP_POWER = ws.getPValue();
+      KI_POWER = ws.getIValue();
+      if (ws.resetIntegral()) {
+        pc_integrator = 0;
+      }
+    } else {
+      KP_LEVEL = ws.getPValue();
+      KI_LEVEL = ws.getIValue();
+      if (ws.resetIntegral()) {
+        lc_integrator = 0;
+      }
+    }
+  }
+}
+
+void set_lora_send() {
+  tel_out.operating_mode = static_cast<int>(cmi);
+  tel_out.power = cpu->get_meassured_power_W();
+  tel_out.level = cpu->level_meassured_p;
+
+  ws.setMessage(tel_out.enc_outgoing_msg().c_str());
+  last_esp_send = millis();
+  my_log("WS send set");
 }
 
 // Convenience overload used by the physical selector switch
@@ -359,11 +414,16 @@ void set_nozzle_positions(float demand_w) {
   demand_w = clampf(demand_w, 0.0f, MAX_POWER_W);
 
   float n1, n2;
+  bool bv = true;
 
   if (demand_w <= BALL_POWER_W) {
-    // Stage 0: ball alone is enough, keep prop. nozzles closed
+
     n1 = 0.0f;
     n2 = 0.0f;
+
+    if (demand_w <= BALL_POWER_W / 2) {
+      bv = false;
+    }
 
   } else if (demand_w <= STAGE1_END_W) {
     // Stage 1: ramp nozzle 1 from 0 to 80 %
@@ -383,7 +443,7 @@ void set_nozzle_positions(float demand_w) {
 
   cpu->valve1_cv_pc = n1;
   cpu->valve2_cv_pc = n2;
-  cpu->ball_valve_cv = true;  // always open during generation
+  cpu->ball_valve_cv = bv;
 }
 
 // ============================================================
@@ -405,12 +465,12 @@ float required_fill_rate(float level_now, float level_goal, float hours_remainin
 }
 
 // Core PI update; returns new power setpoint [W]
-float pi_update(float setpoint, float measured, float dt_s) {
+float pi_level_update(float setpoint, float measured, float dt_s) {
   float error = setpoint - measured;
 
   lc_integrator += error * dt_s;
-  // Anti-windup: clamp raw integrator so KI*integrator ∈ [I_MIN, I_MAX]
-  lc_integrator = clampf(lc_integrator, I_MIN / KI_LEVEL, I_MAX / KI_LEVEL);
+  // Anti-windup
+  lc_integrator = clampf(lc_integrator, IL_MIN, IL_MAX);
 
   float output = setpoint
                  + KP_LEVEL * error
@@ -420,7 +480,7 @@ float pi_update(float setpoint, float measured, float dt_s) {
 
 // Called every control cycle when the mode is CONSTANT_LEVEL
 // or the CONSTANT_LEVEL sub-mode of a night mode.
-void update() {
+void update_level() {
   float now_ms = (float)millis();
   float ac_level = cpu->level_meassured_p;
   float goal = setpoint_level_pc;
@@ -434,38 +494,92 @@ void update() {
   }
   lc_indirect_active = true;
 
-  // ── Indirect setpoint ramp (night drain mode) ────────
   unsigned long dt_ms = (unsigned long)(now_ms)-lc_last_update_ms;
-  dt_ms = (unsigned long)clampi((int)dt_ms, 0, PI_PERIOD_S * 1200);
+  dt_ms = (unsigned long)clampi((int)dt_ms, 0, LEVEL_PI_PERIOD_S * 1200);
 
-  if (dt_ms < (unsigned long)(PI_PERIOD_S * 1000)) {
+  if (dt_ms < (unsigned long)(LEVEL_PI_PERIOD_S * 1000)) {
     return;  // not yet time to update
   }
   lc_last_update_ms = (unsigned long)now_ms;
 
+  // ── Indirect setpoint ramp (night drain mode) ────────
   bool night_drain = (cmi == ControlMode::CONSTANT_LEVEL_NIGHT) && !is_day;
+  bool day_fill = (cmi == ControlMode::CONSTANT_LEVEL_NIGHT) && is_day;
 
   if (night_drain) {
     // Ramp the internal setpoint toward NIGHT_DRAIN_SETPOINT
     float hours_left = scheduler.time_h_till_h(DAY_START_HOUR);
     float rate_ph = required_fill_rate(ac_level, NIGHT_DRAIN_SETPOINT, hours_left);
     float slope = (float)dt_ms / 1000.0f / 3600.0f * rate_ph;
-    lc_indirect_setpoint = clampf(lc_indirect_setpoint + slope, 0.0f, 1.0f);
-    goal = lc_indirect_setpoint;
+    goal = clampf(NIGHT_DRAIN_SETPOINT + slope, 0.0f, 100.0f);
+  } else if (day_fill) {
+    float hours_left = scheduler.time_h_till_h(DAY_END_HOUR);
+    float rate_ph = required_fill_rate(ac_level, DAY_FILL_SETPOINT, hours_left);
+    float slope = (float)dt_ms / 1000.0f / 3600.0f * rate_ph;
+    goal = clampf(DAY_FILL_SETPOINT + slope, 0.0f, 100.0f);
   }
 
   // ── Run PI ───────────────────────────────────────────
   float dt_s = (float)dt_ms / 1000.0f;
-  float new_power = pi_update(goal, ac_level, dt_s);
+  float new_power = pi_level_update(goal, ac_level, dt_s);
   setpoint_power_w = clampf(new_power, 0.0f, 500.0f);  // clamp to turbine range
 }
 
 }  // namespace LevelController
 
+namespace PowerController {
+// Core PI update; returns new power setpoint [W]
+float pi_power_update(float setpoint, float measured, float dt_s) {
+  float error = setpoint - measured;
+
+  pc_integrator += error * dt_s;
+  // Anti-windup: clamp raw integrator so KI*integrator ∈ [I_MIN, I_MAX]
+  pc_integrator = clampf(pc_integrator, IP_MIN, IP_MAX);
+
+  float output = setpoint
+                 + KP_POWER * error
+                 + KI_POWER * pc_integrator;
+  my_log("PI CONTROLLER: Error: " + String(error) + " I: " + String(pc_integrator));
+  return output;
+}
+
+void update_power() {
+  float now_ms = (float)millis();
+
+  unsigned long dt_ms = (unsigned long)(now_ms)-pc_last_update_ms;
+  dt_ms = (unsigned long)clampi((int)dt_ms, 0, POWER_PI_PERIOD_S * 1200);
+  if (dt_ms < (unsigned long)(POWER_PI_PERIOD_S * 1000)) {
+    return;  // not yet time to update
+  }
+
+  float ac_power = cpu->get_meassured_power_W();
+  float goal = setpoint_power_w;
+
+  pc_last_update_ms = (unsigned long)now_ms;
+  // ── Run PI ───────────────────────────────────────────
+  float dt_s = (float)dt_ms / 1000.0f;
+  float new_power = pi_power_update(goal, ac_power, dt_s);
+  //my_log("Running Pi Power update, Meassured: " + String(ac_power) + "W, Setpoint: " + String(goal) + "W, PI power: " + String(new_power) + "W");
+  set_nozzle_positions(new_power);
+}
+
+}  // namespace Powercontroleer
+
+void reset_pi_controllers() {
+  pc_integrator = 0.0;
+  lc_integrator = 0.0;
+}
+
+unsigned long last_power_control_update;
+unsigned long last_level_control_update;
+
 // ============================================================
 //  Control-mode actions  (called every loop cycle)
 // ============================================================
 void run_control_mode() {
+
+  int level_update_interval_s = 30;
+  int power_update_interval_s = 5;
 
   // Helper lambdas
   auto stop_all = [&]() {
@@ -481,9 +595,9 @@ void run_control_mode() {
 
   // Resolve the effective mode when a secondary is active
   ControlMode effective = cmi;
-  if (cmi == ControlMode::CONSTANT_POWER_NIGHT || cmi == ControlMode::CONSTANT_LEVEL_NIGHT) {
+  /*if (cmi == ControlMode::CONSTANT_POWER_NIGHT || cmi == ControlMode::CONSTANT_LEVEL_NIGHT) {
     effective = cmi_sec;
-  }
+  }*/
 
   switch (effective) {
 
@@ -497,8 +611,7 @@ void run_control_mode() {
 
     // ── FILLING ──────────────────────────────────────────
     case ControlMode::FILLING:
-      if (cpu->level_meassured_p >= 1.0f) {
-        // Tank full — switch to the appropriate hold mode
+      if (cpu->level_meassured_p >= 95.0f) {
         set_control_mode(
           (cmi == ControlMode::CONSTANT_POWER_NIGHT)
             ? ControlMode::CONSTANT_POWER_NIGHT
@@ -513,24 +626,27 @@ void run_control_mode() {
       break;
 
     // ── CONSTANT POWER ───────────────────────────────────
+    case ControlMode::CONSTANT_POWER_NIGHT:
     case ControlMode::CONSTANT_POWER:
-      set_nozzle_positions(setpoint_power_w);
-      lamp_green = LampState::ON;
-      lamp_red = LampState::OFF;
+      PowerController::update_power();
       break;
 
     // ── CONSTANT LEVEL ───────────────────────────────────
+    case ControlMode::CONSTANT_LEVEL_NIGHT:
     case ControlMode::CONSTANT_LEVEL:
-      LevelController::update();
-      set_nozzle_positions(setpoint_power_w);
-      lamp_green = LampState::ON;
-      lamp_red = LampState::OFF;
+      LevelController::update_level();
+      PowerController::update_power();
       break;
 
     default:
       stop_all();
       break;
   }
+}
+
+void stageing_test(float power) {
+  set_nozzle_positions(power);
+  my_log("setting positions for " + String(power) + "W, BV0: " + String(cpu->ball_valve_cv) + "V1:" + String(cpu->valve1_cv_pc) + " ,V2: " + String(cpu->valve1_cv_pc));
 }
 
 // ============================================================
@@ -561,6 +677,22 @@ void error_management() {
     lamp_red = LampState::BLINK_FAST;
   }*/
 
+  //Value monitoring
+  if (!monitor_valve1.set_target(cpu->valve1_cv_pc)) {
+    cpu->valve1_cv_pc = 0.0;
+    my_log("Value setting error Valve 1");
+  }
+
+  int v_mon_v1_status = monitor_valve1.monitor(cpu->valve1_fb_pc);
+  if (v_mon_v1_status != 0) {
+    my_log("Value monitoor error Valve 1, status: " + String(v_mon_v1_status));
+  }
+
+  monitor_bv.set_target(cpu->ball_valve_cv);
+  int v_mon_bv_status = monitor_bv.monitor(cpu->ball_valve_open, cpu->ball_valve_closed);
+  if (v_mon_bv_status != 0) {
+    my_log("Value monitoor error Ball Valve, status: " + String(v_mon_bv_status));
+  }
   
 }
 
@@ -626,31 +758,32 @@ void logIOState(unsigned long now) {
   my_log("──────────────── IO State ────────────────");
 
   // Analog In
-  my_log_pair("  water_temp        : ", cpu->water_temp_dC,       "°C");
-  my_log_pair("  surround_temp     : ", cpu->surround_temp_dC,    "°C");
+  my_log_pair("  water_temp        : ", cpu->water_temp_dC, "°C");
+  my_log_pair("  surround_temp     : ", cpu->surround_temp_dC, "°C");
   my_log_pair("  water_pressure    : ", cpu->water_preassure_bar, "bar");
-  my_log_pair("  level_measured    : ", cpu->level_meassured_p,   "%");
-  my_log_pair("  voltage           : ", cpu->voltage_V,           "V");
-  my_log_pair("  current           : ", cpu->current_A,           "A");
-  my_log_pair("  valve1_fb         : ", cpu->valve1_fb_pc,        "%");
-  my_log_pair("  valve2_fb         : ", cpu->valve2_fb_pc,        "%");
+  my_log_pair("  level_measured    : ", cpu->level_meassured_p, "%");
+  my_log_pair("  voltage           : ", cpu->voltage_V, "V");
+  my_log_pair("  current           : ", cpu->current_A, "A");
+  my_log_pair("  power             : ", cpu->get_meassured_power_W(), "W");
+  my_log_pair("  valve1_fb         : ", cpu->valve1_fb_pc, "%");
+  my_log_pair("  valve2_fb         : ", cpu->valve2_fb_pc, "%");
 
   // Analog Out
-  my_log_pair("  valve1_cv         : ", cpu->valve1_cv_pc,        "%");
-  my_log_pair("  valve2_cv         : ", cpu->valve2_cv_pc,        "%");
+  my_log_pair("  valve1_cv         : ", cpu->valve1_cv_pc, "%");
+  my_log_pair("  valve2_cv         : ", cpu->valve2_cv_pc, "%");
 
   // Digital In
-  my_log_pair("  ball_valve_open   : ", cpu->ball_valve_open          ? "1" : "0");
-  my_log_pair("  ball_valve_closed : ", cpu->ball_valve_closed        ? "1" : "0");
-  my_log_pair("  float_switch      : ", cpu->float_switch_triggered   ? "1" : "0");
-  my_log_pair("  select_off        : ", cpu->select_off               ? "1" : "0");
-  my_log_pair("  select_level      : ", cpu->select_level             ? "1" : "0");
-  my_log_pair("  select_remote     : ", cpu->select_remote            ? "1" : "0");
+  my_log_pair("  ball_valve_open   : ", cpu->ball_valve_open ? "1" : "0");
+  my_log_pair("  ball_valve_closed : ", cpu->ball_valve_closed ? "1" : "0");
+  my_log_pair("  float_switch      : ", cpu->float_switch_triggered ? "1" : "0");
+  my_log_pair("  select_off        : ", cpu->select_off ? "1" : "0");
+  my_log_pair("  select_level      : ", cpu->select_level ? "1" : "0");
+  my_log_pair("  select_remote     : ", cpu->select_remote ? "1" : "0");
 
   // Digital Out
-  my_log_pair("  ball_valve_cv     : ", cpu->ball_valve_cv            ? "1" : "0");
-  my_log_pair("  lamp_green        : ", cpu->lamp_green               ? "1" : "0");
-  my_log_pair("  lamp_red          : ", cpu->lamp_red                 ? "1" : "0");
+  my_log_pair("  ball_valve_cv     : ", cpu->ball_valve_cv ? "1" : "0");
+  my_log_pair("  lamp_green        : ", cpu->lamp_green ? "1" : "0");
+  my_log_pair("  lamp_red          : ", cpu->lamp_red ? "1" : "0");
 
   //Important variables
   my_log("  Power Setpoint  " + String(setpoint_power_w));
@@ -728,22 +861,23 @@ void loop() {
   //ws.setStatusShortSetpoint("OK");
   // ws.pushStatusMessage("some my_log line");
 
-  error_management();
 
-  //run_control_mode();
+  run_control_mode();
+  //stageing_test(setpoint_power_w);
 
-  // 6. Update indicator LEDs
   LEDs::update();
 
+  //error_management();
+
   // 7. Write all outputs
-  
   // Push live values into the webserver state
   ws.setPower(cpu->get_meassured_power_W());
   ws.setLevel(cpu->level_meassured_p);
   ws.setMode(cmi);
+
   cpu->surround_temp_dC = ws.getTemp();
   ws.setStatusShort(controlModeStr(cmi).c_str());
-  
+
   logIOState(millis());
   cpu->write_outputs();
 }

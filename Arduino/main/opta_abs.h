@@ -20,7 +20,7 @@ public:
   float water_temp_dC{ 0.0 };
   float surround_temp_dC{ 0.0 };
   float water_preassure_bar{ 0.0 };
-  float level_meassured_p{ 0.0 };
+  float level_meassured_p{ 0.0 };  //0-100
   float voltage_V{ 0.0 };
   float current_A{ 0.0 };
   float valve1_fb_pc{ 0.0 };
@@ -171,7 +171,21 @@ public:
   }
 
   float get_meassured_power_W() {
-    return voltage_V * current_A;
+    //average over the last 20 samples
+    static float buf[20] = { 0 };
+    static uint8_t idx = 0;
+    static bool full = false;
+
+    float raw = voltage_V * current_A;
+
+    buf[idx] = raw;
+    idx = (idx + 1) % 20;
+    if (idx == 0) full = true;
+
+    uint8_t count = full ? 20 : idx;
+    float sum = 0;
+    for (uint8_t i = 0; i < count; i++) sum += buf[i];
+    return sum / count;
   }
 
   // RTD constants
@@ -186,17 +200,23 @@ public:
     select_off = digitalRead(A3);
     select_level = digitalRead(A4);
     select_remote = true;  //digitalRead(A5); todo
-    current_A = adc_to_V(analogRead(A6));
+    current_A = (adc_to_V(analogRead(A6)) - 2.25) * 2;
+    if (current_A < 0.05) {
+      current_A = 0.0;
+    }
 
     // ----------- analog Expansion (fresh handle each cycle) -----------
     AnalogExpansion aexp = OptaController.getExpansion(device_index);
 
-    water_temp_dC = (-(1.0 / 100.0) * (50.0 * a - 10*sqrt(b * aexp.getRtd(0) + 25.0 * pow(a, 2.0) - 100.0 * b))) / b;
+    water_temp_dC = (-(1.0 / 100.0) * (50.0 * a - 10 * sqrt(b * aexp.getRtd(0) + 25.0 * pow(a, 2.0) - 100.0 * b))) / b;
 
-    water_preassure_bar = aexp.pinVoltage(1);  
-    voltage_V = aexp.pinVoltage(3);            //todo umrechnen
-    valve1_fb_pc = aexp.pinVoltage(5) * 10.0;
-    valve2_fb_pc = aexp.pinVoltage(6) * 10.0;
+    water_preassure_bar = aexp.pinVoltage(1);
+    voltage_V = aexp.pinVoltage(3) * 3.0;
+    if (voltage_V < 0.1){
+      voltage_V = 0;
+    }    
+    valve1_fb_pc = (aexp.pinVoltage(5) - 2) * 100 / 8;
+    valve2_fb_pc = (aexp.pinVoltage(6) - 2) * 100 / 8;
 
     level_meassured_p = i_to_level_p(water_preassure_bar);
   }
@@ -212,14 +232,14 @@ public:
     digitalWrite(LEDB, led_int_b);
 
     digitalWrite(D0, ball_valve_cv);
-    digitalWrite(D1, lamp_green);
-    digitalWrite(D2, lamp_red);
+    //digitalWrite(D1, lamp_green);   
+    //digitalWrite(D2, lamp_red);
 
     // ----------- analog Expansion -----------
     AnalogExpansion aexp = OptaController.getExpansion(device_index);
 
-    float v1_V = valve1_cv_pc / 10.0;
-    float v2_V = valve2_cv_pc / 10.0;
+    float v1_V = 2 + (valve1_cv_pc * 0.08);
+    float v2_V = 2 + (valve1_cv_pc * 0.08);
 
     aexp.pinVoltage(4, v1_V);
     aexp.pinVoltage(7, v2_V);
