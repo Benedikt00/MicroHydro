@@ -39,8 +39,8 @@ const int esp_send_time = 300000;
 unsigned long last_esp_send{ 0 };
 
 // ── Telegram management ───────────────────────────────────────────────────────────
-telegram_management tel_inc;
-telegram_management tel_out;
+telegram_management tel_inc(1);
+telegram_management tel_out(1);
 
 // ────────────────────────────────────────────────────────────
 //  Time / schedule configuration
@@ -356,9 +356,9 @@ void wifi_loop() {
 void set_lora_send() {
   tel_out.operating_mode = static_cast<int>(cmi);
   tel_out.power = cpu->get_meassured_power_W();
-  tel_out.level = cpu->level_meassured_p;
+  tel_out.level_pc = cpu->level_meassured_p;
 
-  ws.setMessage(tel_out.enc_outgoing_msg().c_str());
+  ws.setMessage(tel_out.enc_outgoing_msg().c_str()); //also sets send flag = true
   last_esp_send = millis();
   my_log("WS send set");
 }
@@ -743,8 +743,8 @@ const String controlModeStr(ControlMode m) {
     case ControlMode::STOP: return "STOP";
     case ControlMode::CONSTANT_POWER: return "LEISTUNG";
     case ControlMode::CONSTANT_LEVEL: return "PEGEL";
-    case ControlMode::CONSTANT_POWER_NIGHT: return "LEISTUNG NACHT";
-    case ControlMode::CONSTANT_LEVEL_NIGHT: return "PEGEL NACHT";
+    case ControlMode::CONSTANT_POWER_NIGHT: return "LEISTUNG N";
+    case ControlMode::CONSTANT_LEVEL_NIGHT: return "PEGEL N";
     case ControlMode::FILLING: return "FUELLEN";
     default: return "UNBEKANNT";
   }
@@ -839,6 +839,7 @@ void setup() {
 
   delay(2000);
   my_log("*** Init complete ***");
+  set_lora_send();
 }
 
 // ============================================================
@@ -878,6 +879,6 @@ void loop() {
   cpu->surround_temp_dC = ws.getTemp();
   ws.setStatusShort(controlModeStr(cmi).c_str());
 
-  logIOState(millis());
+  //logIOState(millis());
   cpu->write_outputs();
 }

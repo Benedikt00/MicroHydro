@@ -1,12 +1,11 @@
+#define LOG_PLATFORM_ESP32
+
 #include <SD_management.h>
 #include <lcd_management.h>
 #include <lora.h>
-#include <nozzle_control.h>
 #include <telegram_management.h>
-#include <value_monitoring.h>
 #include <webserver.h>
 #include <http_client.h>
-#define LOG_PLATFORM_ESP32
 #include <my_log.h>
 #include <Wire.h>
 #include <Adafruit_BMP280.h>
@@ -25,7 +24,7 @@
  *   RESET       →  17
  *   BUSY        →  4
  *   DIO1        →  0
- *   ANT_SW      →  6  (optional, some boards need this for TX/RX switching)
+ *   
  *
  *  SD CS 16
 */
@@ -56,7 +55,8 @@ const char* AP_PASS = "Einstein123";  // set "" for an open (no password) AP
 const int WIFI_MAX_CONNECTION_TIME = 3000;
 const int WIFI_RECONNECTION_TIME = 5000;  //try to reconnect every 5 seconds
 const int WIFI_POLLING_RATE = 3000;       //time after which cpu is requested again
-unsigned long last_con_time = millis();
+unsigned long last_con_time = 0;
+unsigned long last_suc_req_time = 0;
 
 int last_wifi_req{ 0 };
 
@@ -65,8 +65,13 @@ static const uint16_t AP_PORT = 80;
 
 //INIT COMS
 LoRaCom lora_module(LORA_SS, LORA_DIO1, LORA_RESET, LORA_BUSY);
+SD_management sd(SD_SS);
 
-telegram_management tel;
+
+telegram_management tel_to_gw;
+telegram_management tel_from_gw;
+telegram_management tel_to_cpu;
+telegram_management tel_from_cpu;
 
 lcd_management display;
 unsigned long lastUpdate = 0;
@@ -119,15 +124,30 @@ http_client cpu_api(AP_SSID, AP_PASS, "http://192.168.3.1/");
 const char* ESP_API_PATH = "api/sensor";
 const char* CPU_API_PATH = "api";
 
-void ackErrors() {
-  tel.errors.gw_lora_fail = false;
-  tel.errors.remoteNode_not_reachable = false;
-  tel.errors.gw_lcd_fail = false;
-  tel.errors.gw_wlan_ini_fail = false;
-  tel.ack_out = 1;
+void ackFromCpu() {
+  tel_to_gw.errors.gw_lora_fail = false;
+  tel_to_gw.errors.remoteNode_not_reachable = false;
+  tel_to_gw.errors.gw_lcd_fail = false;
+  tel_to_gw.errors.gw_wlan_ini_fail = false;
+
+  tel_to_gw.ack_out = 1;
+
   //senderState = SEND;
   waitingForAck = false;
   my_log("ACK ERRORS");
+}
+
+void ackFromESP() {
+  tel_to_cpu.errors.gw_lora_fail = false;
+  tel_to_cpu.errors.gateway_not_reachable = false;
+  tel_to_cpu.errors.gw_lcd_fail = false;
+  tel_to_cpu.errors.gw_wlan_ini_fail = false;
+
+  tel_to_cpu.ack_out = 1;
+
+  //senderState = SEND;
+  waitingForAck = false;
+  my_log("ESP ACK ERRORS");
 }
 
 String payload;
@@ -166,10 +186,6 @@ void loracom() {
         //recieve ack
         if (msg == "ACK") {
           my_log("ACK received! ");
-          snprintf(buf, sizeof(buf), "Received: %s  RSSI: %.1f dBm", msg, lora_module.radio.getRSSI());
-
-          snprintf(buf, sizeof(buf), "SNR: %.1f", lora_module.radio.getSNR());
-
           waitingForAck = false;
           //lora_send_reply = true;
           break;
@@ -185,11 +201,9 @@ void loracom() {
 
           } else {  //errors when retrys exceeded
             retries_used = 0;
-            senderState = ERROR;
 
             my_log("Lora Max retries exceedet");
-            tel.errors.gateway_not_reachable = true;
-            snprintf(buf, sizeof(buf), "Lora Max retries exceedet, listening");
+            tel_to_cpu.errors.gateway_not_reachable = true;
             waitingForAck = false;
 
             senderState = RECIEVING;
@@ -199,17 +213,36 @@ void loracom() {
         if (msg != "") {
           my_log("New msg " + String(msg.length()));
 
-          if (msg.length() == tel.MSG_LENGTH) {  //right len
-            my_log("Right len, for node " + msg.substring(tel.DEVICE_ID_SPOT, tel.DEVICE_ID_SPOT + 1));
-            if (msg.substring(tel.DEVICE_ID_SPOT, tel.DEVICE_ID_SPOT + 1).toInt() == thisLORA_ID) {  //for this node
-              tel.dec_incoming_msg(msg);
+          //check if any foreign characters in msg
+          bool valid = true;
+          for (int i = 0; i < msg.length(); i++) {
+            if (!isDigit(msg[i]) && msg[i] != '.') {
+              valid = false;
+              break;
+            }
+          }
+          if (!valid) {
+            my_log("Invalid chars in msg: " + msg);
+            if (msg.length() > 45){
+              //wierd lora rec, reeint
+              my_log("Lora Reint ");
+              lora_module.init();
+            }
+            return;
+          }
+          if (msg.length() == tel_from_gw.MSG_LENGTH) {                                                              //right len
+            if (msg.substring(tel_from_gw.DEVICE_ID_SPOT, tel_from_gw.DEVICE_ID_SPOT + 1).toInt() == thisLORA_ID) {  //for this node
+              tel_from_gw.dec_incoming_msg(msg);
+              sd.write_telegram(msg);
+
+              tel_to_cpu.errors.gw_lora_fail = false;
+              tel_to_cpu.errors.rn_lora_ini_fail = false;
+
+              handle_gw_tel_in();
               lastRecieveTime = millis();
               my_log("MSG recieved " + msg);
               char buf[STATUS_MSG_LEN];
 
-              snprintf(buf, sizeof(buf), "Received: %s  RSSI: %d dBm", msg, lora_module.radio.getRSSI());
-
-              snprintf(buf, sizeof(buf), "SNR: %.1f", lora_module.radio.getSNR());
               waitingToAck = true;
               //lora_set_recieving = true;
               wait_for_lora_round_trip = false;
@@ -222,39 +255,33 @@ void loracom() {
 
     case SEND:
       {
-        //return if error
-        if (tel.errors.gateway_not_reachable) {
-          senderState = ERROR;
-          break;
-        }
+
         //send ack if requested
         if (waitingToAck && (millis() - lastRecieveTime >= LORA_WAIT_TO_ACK_TIMEOUT)) {
           payload = "ACK";
           waitingToAck = false;
-          my_log("Sending ack after: " + String(lastRecieveTime) + " " + String(millis() - lastRecieveTime) + " TO: " + String(LORA_WAIT_TO_ACK_TIMEOUT));
-
           //lora_send_reply = true;
         } else {
           //set message
-          payload = tel.enc_outgoing_msg();
+          payload = tel_to_gw.enc_outgoing_msg();
           waitingForAck = true;
           my_log("Waiting for ack");
         }
 
         //send
         lora_module.transmit(payload);
+        lastSendTime = millis();
 
-        if (lora_module.loraError) {
-          tel.errors.gw_lora_fail = true;
+        if (lora_module.loraError && !(lora_module.loraStatus == -5)) {  // -5 = timeout, probably sent it anyways
+          tel_to_cpu.errors.gw_lora_fail = true;
           my_log("Set Gateway Error");
           senderState = ERROR;
           break;
         }
-        tel.errors.gw_lora_fail = false;
+        tel_to_cpu.errors.gw_lora_fail = false;
 
         // Switch to receive mode to listen for ACK
 
-        lastSendTime = millis();
         my_log("Set Recieve");
 
         lora_module.beginReceive();
@@ -264,26 +291,149 @@ void loracom() {
 
     case ERROR:
       {
-        if (lora_module.loraError && !tel.errors.rn_lora_ini_fail && !tel.errors.gateway_not_reachable) {
+        if (lora_module.loraError && !tel_to_cpu.errors.rn_lora_ini_fail && !tel_to_cpu.errors.gateway_not_reachable) {
           lora_module.init();
           if (!lora_module.loraError) {
-            tel.errors.remoteNode_not_reachable = false;
+            tel_to_cpu.errors.rn_lora_ini_fail = false;
             my_log("Set Send from Error");
             senderState = SEND;
           }
           break;
         }
 
-        if (tel.errors.gateway_not_reachable) {
+        if (tel_to_cpu.errors.gateway_not_reachable) {
           senderState = RECIEVING;
           my_log("Set Recieve from Error");
-          display.error = "LoRa w for re con";
           break;
         }
       }
   }
 }
 
+void write_error_to_display() {
+  if (tel_to_gw.errors.rn_wlan_ini_fail) {
+    display.set_error("Wlan fehler");
+    return;
+  }
+  if (tel_to_gw.errors.cpu_not_reachable) {
+    display.set_error("CPU nicht erreichbar");
+    return;
+  }
+  if (tel_to_cpu.errors.rn_lora_ini_fail) {
+    display.set_error("LoRa init. fehler");
+    return;
+  }
+  if (tel_to_gw.errors.gateway_not_reachable) {
+    display.set_error("LoRa nicht erreichbar");
+    return;
+  }
+
+  if (tel_to_cpu.tel_to_cpu.errors.rn_bmp_fail){
+    display.set_error("BMP sensor failed");
+    return;
+  }
+
+  if (tel_from_cpu.errors.cpu_es_triggered) {
+    display.set_error("CPU NOTHALT");
+    return;
+  }
+  if (tel_from_cpu.errors.level_station_not_reachable) {
+    display.set_error("Messung nicht errei");
+    return;
+  }
+  if (tel_from_cpu.errors.cpu_floater_triggered) {
+    display.set_error("Schwimmer ausgelöst");
+    return;
+  }
+  if (tel_from_cpu.errors.cpu_temp_to_low) {
+    display.set_error("Wasser zu kalt");
+    return;
+  }
+  if (tel_from_cpu.errors.cpu_temp_error_general) {
+    display.set_error("Temperatur fehler");
+    return;
+  }
+  if (tel_from_cpu.errors.cpu_power_error) {
+    display.set_error("Pegelfehler");
+    return;
+  }
+  if (tel_from_cpu.errors.cpu_power_error) {
+    display.set_error("Leistungsfehler");
+    return;
+  }
+  if (tel_from_cpu.errors.cpu_main_valve_error) {
+    display.set_error("Kugelhahn NIO");
+    return;
+  }
+  if (tel_from_cpu.errors.cpu_valve1_error) {
+    display.set_error("Ventil 1 NIO");
+    return;
+  }
+  if (tel_from_cpu.errors.cpu_valve2_error) {
+    display.set_error("Ventil 2 NIO");
+    return;
+  }
+  if (tel_from_cpu.errors.cpu_time_not_set) {
+    display.set_error("bitte Zeit setzten");
+    return;
+  }
+  if (tel_from_cpu.errors.rn_lcd_fail) {
+    display.set_error("RemN LCD fehler");
+    return;
+  }
+  if (tel_to_gw.errors.rn_sd_not_reachable) {
+    display.set_error("RemN SD fehler");
+    return;
+  }
+  if (tel_to_gw.errors.gw_wlan_ini_fail) {
+    display.set_error("GW Wlan fehler");
+    return;
+  }
+}
+
+void error_management() {
+  if (millis() - last_suc_req_time >= 60000) {
+    tel_to_gw.errors.cpu_not_reachable;
+  }
+  if (millis() - lastRecieveTime >= 300000) {
+    tel_out.errors.remoteNode_not_reachable = true;
+  }
+
+
+  tel_to_gw.errors.rn_sd_not_reachable = sd.SD_error;
+
+  write_error_to_display();
+}
+
+void handle_gw_tel_in() {
+
+  tel_to_cpu.level_pc = tel_from_gw.level_pc;
+  tel_to_cpu.power = tel_from_gw.power;
+  tel_to_cpu.operating_mode = tel_from_gw.operating_mode;
+  tel_to_cpu.ack_out = tel_from_gw.ack_in;
+  tel_to_cpu.errors.gw_wlan_ini_fail = tel_from_gw.errors.gw_wlan_ini_fail;
+}
+
+void handle_cpu_tel_in() {
+
+  tel_to_gw.level_pc = tel_from_cpu.level_pc;
+  tel_to_gw.power = tel_from_cpu.power;
+  tel_to_gw.ack_in = tel_from_cpu.ack_out;
+  tel_to_gw.operating_mode = tel_from_cpu.operating_mode;
+
+  tel_to_gw.errors.cpu_es_triggered = tel_from_cpu.errors.cpu_es_triggered;
+  tel_to_gw.errors.cpu_power_error = tel_from_cpu.errors.cpu_power_error;
+  tel_to_gw.errors.cpu_preassure_error = tel_from_cpu.errors.cpu_preassure_error;
+  tel_to_gw.errors.cpu_temp_error_general = tel_from_cpu.errors.cpu_temp_error_general;
+  tel_to_gw.errors.cpu_main_valve_error = tel_from_cpu.errors.cpu_main_valve_error;
+  tel_to_gw.errors.cpu_valve1_error = tel_from_cpu.errors.cpu_valve1_error;
+  tel_to_gw.errors.cpu_valve2_error = tel_from_cpu.errors.cpu_valve2_error;
+  tel_to_gw.errors.cpu_com_to = tel_from_cpu.errors.cpu_com_to;
+  tel_to_gw.errors.cpu_temp_to_low = tel_from_cpu.errors.cpu_temp_to_low;
+  tel_to_gw.errors.cpu_reserve10 = tel_from_cpu.errors.cpu_reserve10;
+  tel_to_gw.errors.cpu_reserve11 = tel_from_cpu.errors.cpu_reserve11;
+  tel_to_gw.errors.cpu_reserve12 = tel_from_cpu.errors.cpu_reserve12;
+}
 
 int BMP_init() {
   Wire.begin();
@@ -303,12 +453,25 @@ int BMP_init() {
   if (!bmp.begin(0x76, chipId)) {
     my_log(F("BMP ERROR: could not initialise BMP280."));
     my_log(F("Try power-cycling the sensor"));
+    tel_to_cpu.errors.rn_bmp_fail = true;
     return false;
   }
   my_log("BMP init success");
   return true;
 }
 
+const String controlModeStr(int m) {
+  switch (m) {
+    case 0: return "UNBEKANNT";
+    case 1: return "STOP";
+    case 2: return "LEISTUNG";
+    case 3: return "PEGEL";
+    case 4: return "LEISTUNG N";
+    case 5: return "PEGEL N";
+    case 6: return "FUELLEN";
+    default: return "UNBEKANNT";
+  }
+}
 
 void WIFI_loop() {
   if (cpu_api.wifiConnected) {
@@ -321,14 +484,19 @@ void WIFI_loop() {
 
       // ── Build payload ───────────────────────────────────────────────────
       reqDoc["temperature"] = bmp.readTemperature();  // or whichever temp field
-      reqDoc["message"] = tel.enc_outgoing_msg();
+      reqDoc["message"] = tel_to_cpu.enc_outgoing_msg();
 
       String payload;
       serializeJson(reqDoc, payload);
 
       // ── POST and parse response ─────────────────────────────────────────
       String response = cpu_api.httpPost(ESP_API_PATH, payload.c_str());
-      if (response.length() == 0) cpu_api.wifiConnected = false;
+      if (response.length() == 0) {
+        if (cpu_api.cpu_request_failed) {
+          cpu_api.wifiConnected = false;
+        }
+        return;
+      }
 
       DeserializationError err = deserializeJson(resDoc, response);
       if (err) {
@@ -337,39 +505,59 @@ void WIFI_loop() {
       }
 
       float power = resDoc["power"] | 0.0f;
+      float level = resDoc["level"] | 0.0f;
       bool sendFlag = resDoc["sendFlag"] | false;
-      const char* message = resDoc["message"] | "";
+      String message = String(resDoc["message"] | "");
       const char* status = resDoc["status"] | "";
       last_con_time = millis();
 
-      Serial.printf("[WIFI] power=%.1f  sendFlag=%d  msg=%s\n", power, sendFlag, message);
-
       display.power = power;
+      display.level = level;
       display.status = String("Regelart: ") + String(status);
+
       display.update();
 
       //olta jaaa, message zu versenden
-      if (sendFlag && strlen(message) > 0) {
+      if (sendFlag && message.length() > 0) {
+        bool valid = true;
+        for (int i = 0; i < message.length(); i++) {
+          if (!isDigit(message[i]) && message[i] != '.') {
+            valid = false;
+            break;
+          }
+        }
+        if (!valid) {
+          my_log("Invalid chars in msg: " + message);
+          return;
+        }
         my_log("[WIFI] Message from Opta, ready to send: " + String(message));
         // handle message
-        tel.dec_incoming_msg(message);
+        tel_from_cpu.dec_incoming_msg(message);
+        sd.write_telegram(message);
+        handle_cpu_tel_in();
         senderState = SEND;
         wait_for_lora_round_trip = true;
         round_trip_start = millis();
+        last_suc_req_time = millis();
       }
     }
     if (direct_send_cpu) {
       direct_send_cpu = false;
 
       // ── Build payload ───────────────────────────────────────────────────
-      reqDoc["message"] = tel.enc_outgoing_msg();
+      reqDoc["message"] = tel_to_cpu.enc_outgoing_msg();
 
       String payload;
       serializeJson(reqDoc, payload);
 
       // ── POST and parse response ─────────────────────────────────────────
       String response = cpu_api.httpPost(CPU_API_PATH, payload.c_str());
-      if (response.length() == 0) return;
+      if (response.length() == 0) {
+        if (cpu_api.cpu_request_failed) {
+          cpu_api.wifiConnected = false;
+        }
+        return;
+      }
 
       DeserializationError err = deserializeJson(resDoc, response);
       if (err) {
@@ -385,6 +573,7 @@ void WIFI_loop() {
       } else {
         my_log("!!!! WiIfi reinit failed !!!!!");
         display.error = "Wifi failed";
+        tel_to_gw.errors.cpu_not_reachable = true;
       }
     }
   }
@@ -409,17 +598,17 @@ void setup() {
 
   lora_module.init();
 
-  tel.errors.gw_lora_fail = lora_module.loraError;
+  tel_to_cpu.errors.gw_lora_fail = lora_module.loraError;
   if (!lora_module.loraError) {
     lora_module.beginReceive();
   }
 
-  tel.out_reciever_id = LORA_GATEWAY_ID;
+  tel_to_gw.out_reciever_id = LORA_GATEWAY_ID;
+  tel_to_gw.out_reciever_id = LORA_GATEWAY_ID;
 
-  BMP_init();
-
-  //SD_management sd(SD_SS);
-
+  if (!BMP_init()){
+    tel_to_cpu.errors.rn_bmp_fail = true;
+  }
 
   if (cpu_api.connectWiFi(5000)) {
     my_log("WiIfi init ok");
@@ -428,8 +617,6 @@ void setup() {
     display.error = "Wifi failed";
     delay(2000);
   }
-
-
 
 
   /*
@@ -460,10 +647,13 @@ void loop() {
   if (millis() - round_trip_start > round_trip_time_max_ms) {
     wait_for_lora_round_trip = false;
     waitingToAck = false;
+    tel_to_cpu.errors.gateway_not_reachable = true;
   }
 
-  digitalWrite(led_onboard, led_State);
+  error_management();
 
+
+  digitalWrite(led_onboard, led_State);
   if (millis() - led_blink_time > 2000) {
     led_blink_time = millis();
     led_State = !led_State;

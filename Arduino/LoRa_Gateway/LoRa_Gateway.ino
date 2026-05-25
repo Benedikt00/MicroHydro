@@ -1,3 +1,4 @@
+#define LOG_PLATFORM_ESP32
 #include <SD_management.h>
 #include <lcd_management.h>
 #include <lora.h>
@@ -6,7 +7,6 @@
 #include <value_monitoring.h>
 #include <webserver.h>
 #include <wire.h>
-#define LOG_PLATFORM_ESP32
 #include <my_log.h>
 /*
  *   LLCC68 Pin  →  Arduino Pin
@@ -43,7 +43,7 @@ int retries_used = 0;
 
 // ── Access Point config ───────────────────────────────────────────────────────
 //  SSID must be ≤ 31 chars. Password must be ≥ 8 chars, or "" for open network.
-const char* AP_SSID = "MicroHydro";
+const char* AP_SSID = "MicroHydro2";
 const char* AP_PASS = "Einstein123";  // set "" for an open (no password) AP
 const uint8_t AP_CHANNEL = 6;         // WiFi channel 1–13
 const uint8_t AP_HIDDEN = 0;          // 0 = broadcast SSID, 1 = hidden
@@ -51,7 +51,7 @@ const uint8_t AP_MAX_CON = 4;         // max simultaneous clients
 
 // The ESP32 AP always uses 192.168.4.1 as its gateway/IP by default.
 // You can override this with WiFi.softAPConfig() below if needed.
-static const IPAddress AP_IP(192, 168, 0, thisLORA_ID);
+static const IPAddress AP_IP(192, 168, 3, thisLORA_ID);
 static const uint16_t AP_PORT = 80;
 
 WebserverAbstraction* ws = nullptr;
@@ -81,7 +81,7 @@ SenderState senderState = SEND;
 
 unsigned long lastSendTime = 0;
 unsigned long lastRecieveTime = 0;
-unsigned long lastReconAttempt{0};
+unsigned long lastReconAttempt{ 0 };
 //bool need_to_respond_to_rem_nod = false;
 int packetCounter = 0;
 
@@ -116,15 +116,39 @@ void ackErrors() {
   my_log("ACK ERRORS");
 }
 
-String payload;
-char buf[STATUS_MSG_LEN];
+void hmi_write_state() {
+  display.power = tel_inc.power;
+  ws->setPower(tel_inc.power);
 
+  display.level = tel_inc.level_pc;
+  ws->setLevel(tel_inc.level_pc);
 
-void errorManagement() {
-  if (tel_out.errors.gw_lora_fail) {
-    display.status = "LoRa Fehler...";
+  display.status = String("Regelart: " + controlModeStr(tel_inc.operating_mode));
+  ws->setStatusShort(controlModeStr(tel_inc.operating_mode).c_str());
+}
+
+void telegram_handling() {
+  tel_out.operating_mode = tel_inc.operating_mode;
+  tel_out.power = tel_inc.power;
+  tel_out.level_pc = tel_inc.level_pc;
+}
+
+const String controlModeStr(int m) {
+  switch (m) {
+    case 0: return "UNBEKANNT";
+    case 1: return "STOP";
+    case 2: return "LEISTUNG";
+    case 3: return "PEGEL";
+    case 4: return "LEISTUNG N";
+    case 5: return "PEGEL N";
+    case 6: return "FUELLEN";
+    default: return "UNBEKANNT";
   }
 }
+
+
+String payload;
+char buf[STATUS_MSG_LEN];
 
 void loracom() {
   switch (senderState) {
@@ -141,7 +165,7 @@ void loracom() {
         }
 
         //set send to reply after ack and timeoute
-        if (lora_send_reply && !waitingForAck && (millis() - lastSendTime >= LORA_REPLY_TIME)) {
+        if (lora_send_reply && !waitingToAck && (millis() - lastSendTime >= LORA_REPLY_TIME)) {
           my_log("Sending reply msg");
           senderState = SEND;
           lora_send_reply = false;
@@ -181,7 +205,7 @@ void loracom() {
           } else {  //errors when retrys exceeded
             retries_used = 0;
             my_log("Lora Max retries exceedet");
-            display.error("LoRa wait to re con");
+            display.error = "LoRa wait to re con";
             lastReconAttempt = millis();
             tel_out.errors.remoteNode_not_reachable = true;
             snprintf(buf, sizeof(buf), "Lora Max retries exceedet");
@@ -194,12 +218,25 @@ void loracom() {
         if (msg != "") {
           my_log("New msg " + String(msg.length()));
 
+          bool valid = true;
+          for (int i = 0; i < msg.length(); i++) {
+            if (!isDigit(msg[i]) && msg[i] != '.') {
+              valid = false;
+              break;
+            }
+          }
+          if (!valid) {
+            my_log("Invalid chars in msg: " + msg);
+            return;
+          }
+
           if (msg.length() == tel_inc.MSG_LENGTH) {  //right len
             my_log("Right len, for node " + msg.substring(tel_inc.DEVICE_ID_SPOT, tel_inc.DEVICE_ID_SPOT + 1));
             if (msg.substring(tel_inc.DEVICE_ID_SPOT, tel_inc.DEVICE_ID_SPOT + 1).toInt() == thisLORA_ID) {  //for this node
               tel_inc.dec_incoming_msg(msg);
               lastRecieveTime = millis();
               my_log("MSG recieved " + msg);
+
               char buf[STATUS_MSG_LEN];
 
               snprintf(buf, sizeof(buf), "Received: %s  RSSI: %d dBm", msg, lora_module.radio.getRSSI());
@@ -229,13 +266,12 @@ void loracom() {
         if (waitingToAck && (millis() - lastRecieveTime >= LORA_WAIT_TO_ACK_TIMEOUT)) {
           payload = "ACK";
           waitingToAck = false;
-          my_log("Sending ack after: " + String(lastRecieveTime) + " " + String(millis() - lastRecieveTime) + " TO: " + String(LORA_WAIT_TO_ACK_TIMEOUT));
+          //my_log("Sending ack after: " + String(lastRecieveTime) + " " + String(millis() - lastRecieveTime) + " TO: " + String(LORA_WAIT_TO_ACK_TIMEOUT));
 
         } else {
           //set message
           payload = tel_out.enc_outgoing_msg();
           waitingForAck = true;
-          my_log("Waiting for ack");
         }
 
         //send
@@ -270,15 +306,11 @@ void loracom() {
           }
         }
 
-        break;
         if (tel_out.errors.remoteNode_not_reachable) {
-          if ((millis() - lastReconAttempt) > 30000){
-            senderState = SEND;
+          senderState = RECIEVING;
           my_log("Set Recieve from Error");
-          display.error = "LoRa try to re con";
+          display.error = "LoRa wait for re con";
           break;
-          }
-          
         }
       }
   }
@@ -335,8 +367,6 @@ void WIFI_loop() {
   float pwrSP = ws->getPowerSetpoint();
   int lvlSP = ws->getLevelSetpoint();
 
-
-
   // ── Periodic my_log ──────────────────────────────────────────────────────
   if (ws->getAckErrors()) {
     ws->resetAck();
@@ -344,36 +374,90 @@ void WIFI_loop() {
   }
 }
 
-void telegram_handling(){
-    tel_out.operating_mode = tel_inc.operating_mode;
+void write_error_to_display() {
+  if (tel_out.errors.gw_lora_fail) {
+    display.set_error("LoRa init. fehler");
+    return;
+  }
+  if (tel_out.errors.remoteNode_not_reachable) {
+    display.set_error("LoRa nit erreichbar");
+    return;
+  }
+  if (tel_out.errors.gw_wlan_ini_fail) {
+    display.set_error("Wlan fehler");
+    return;
+  }
+  if (tel_inc.errors.rn_wlan_ini_fail) {
+    display.set_error("RemN Wlan fehler");
+    return;
+  }
+  if (tel_inc.errors.cpu_not_reachable) {
+    display.set_error("CPU nicht erreichbar");
+    return;
+  }
+  if (tel_inc.errors.cpu_es_triggered) {
+    display.set_error("CPU NOTHALT");
+    return;
+  }
+  if (tel_inc.errors.level_station_not_reachable) {
+    display.set_error("Messung nicht errei");
+    return;
+  }
+  if (tel_inc.errors.cpu_floater_triggered) {
+    display.set_error("Schwimmer ausgelöst");
+    return;
+  }
+  if (tel_inc.errors.cpu_temp_to_low) {
+    display.set_error("Wasser zu kalt");
+    return;
+  }
+  if (tel_inc.errors.cpu_temp_error_general) {
+    display.set_error("Temperatur fehler");
+    return;
+  }
+  if (tel_inc.errors.cpu_power_error) {
+    display.set_error("Pegelfehler");
+    return;
+  }
+  if (tel_inc.errors.cpu_power_error) {
+    display.set_error("Leistungsfehler");
+    return;
+  }
+  if (tel_inc.errors.cpu_main_valve_error) {
+    display.set_error("Kugelhahn NIO");
+    return;
+  }
+  if (tel_inc.errors.cpu_valve1_error) {
+    display.set_error("Ventil 1 NIO");
+    return;
+  }
+  if (tel_inc.errors.cpu_valve2_error) {
+    display.set_error("Ventil 2 NIO");
+    return;
+  }
+  if (tel_inc.errors.cpu_time_not_set) {
+    display.set_error("bitte Zeit setzten");
+    return;
+  }
+  if (tel_inc.errors.rn_lcd_fail) {
+    display.set_error("RemN LCD fehler");
+    return;
+  }
+  if (tel_inc.errors.rn_sd_not_reachable) {
+    display.set_error("RemN SD fehler");
+    return;
+  }
+  display.set_error("");
 }
 
-const String controlModeStr(int m) {
-  switch (m) {
-    case 0: return "UNBEKANNT";
-    case 1: return "STOP";
-    case 2: return "LEISTUNG";
-    case 3: return "PEGEL";
-    case 4: return "LEISTUNG NACHT";
-    case 5: return "PEGEL NACHT";
-    case 6: return "FUELLEN";
-    default: return "UNBEKANNT";
+void errorManagement() {
+  write_error_to_display();
+
+  if (millis() - lastRecieveTime >= 300000) {
+    tel_out.errors.remoteNode_not_reachable = true;
   }
 }
 
-void hmi_write_state(){
-  display.power = tel_inc.power;
-  ws->setPower(tel_inc.power);
-
-  display.level = tel_inc.level_pc;
-  ws->setLevel(tel_inc.level_pc);
-
-  display.status = String("Regelart: " + controlModeStr(tel_inc.operating_mode));
-  ws->setStatusShort(controlModeStr(tel_inc.operating_mode).c_str());
-
-  
-
-}
 
 void setup() {
   my_log_begin();
@@ -447,10 +531,7 @@ void loop() {
     senderState = SEND;
   }*/
 
-  if (init_lora_con_to_rem_nd_ok && (tel_inc.operating_mode == 0)) {
-    display.status = "LoRa verbunden...";
-    display.error = "Warte auf CPU...";
-  }
+  errorManagement();
 
   if (millis() - lastUpdateLcd > LCD_RATE) {
     lastUpdateLcd = millis();

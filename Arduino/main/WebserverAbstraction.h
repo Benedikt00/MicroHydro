@@ -10,6 +10,9 @@
 #define HOME_PATH "/"
 #define API_PATH "/api"
 #define TIME_PATH "/api/time"
+#define SENSOR_PATH "/api/sensor"
+#define HMI_CR_PATH "/api/hmi_cr"
+
 #define HTTP_GET "GET"
 #define HTTP_POST "POST"
 
@@ -19,13 +22,12 @@
 #define STATUS_MSG_LEN 41    // 40 chars + null
 #define STATUS_SHORT_LEN 21  // 20 chars + null
 
-#define SENSOR_PATH "/api/sensor"
 #define SENSOR_STRING_LEN 64
 
 #define POWER_MAX 340
 #define LEVEL_MAX 100
 
-#define CLIENT_TIMEOUT_MS 2000UL
+#define CLIENT_TIMEOUT_MS 10000UL
 #define HTML_CHUNK_SIZE 256  // bytes sent per update() call when streaming HTML
 
 #include <WiFi.h>
@@ -204,7 +206,7 @@ static const char HMI_HTML[] =
   "send();}"
   "async function send(){"
   "const sp=parseInt(document.getElementById('sr').value);"
-  "try{await fetch('%BASE%/api',{method:'POST',"
+  "try{await fetch('%BASE%/api/hmi_cr',{method:'POST',"
   "headers:{'Content-Type':'application/json'},"
   "body:JSON.stringify({mode,"
   "...(PM.has(mode)&&{powerSetpoint:sp}),"
@@ -598,7 +600,20 @@ private:
       }
       _connState = ConnState::DONE;
 
-    } else if (_pathStr == "/api/pi") {
+     // ── /api/hmi_cr ───────────────────────────────────────────────────────────────────
+    } else if (_pathStr == HMI_CR_PATH) {
+       if (_methodStr == HTTP_POST) {
+        my_log("cr post here");
+        if (_body.length()){
+          _handle_hmi_cr();
+        }
+      } else {
+        _badRequest();
+      }
+      _connState = ConnState::DONE;
+
+    }
+    else if (_pathStr == "/api/pi") {
       if (_methodStr == HTTP_POST) _handlePiValPost();
       else _badRequest();
       _connState = ConnState::DONE;
@@ -627,7 +642,6 @@ private:
   void _handleESPPost() {
     // Parse incoming temperature
     _req.clear();
-    my_log("API request");
     DeserializationError err = deserializeJson(_req, _body);
     if (err) {
       my_log("[WS] Sensor JSON err: " + String(err.f_str()));
@@ -688,6 +702,40 @@ private:
   unsigned long getTime() {
     time_t seconds = time(NULL);
     return (unsigned int)seconds;
+  }
+
+  void _handle_hmi_cr(){
+    _req.clear();
+    DeserializationError err = deserializeJson(_req, _body);
+    if (err) {
+      my_log("[WS] Sensor JSON err: " + String(err.f_str()));
+      _badRequest();
+      return;
+    }
+
+    if (_req.containsKey("mode")) {
+      _sd.mode = static_cast<ControlMode>((int)_req["mode"]);
+    }
+    if (_req.containsKey("ackErrors")){
+      if ((int)_req["ackErrors"] == 1){
+        _sd.ackErrors = 1;
+      }
+    }
+    if (_req.containsKey("powerSetpoint")){
+      _sd.power = (float)_req["powerSetpoint"];
+    }
+    if (_req.containsKey("levelSetpoint")){
+      _sd.power = (float)_req["levelSetpoint"];
+    }
+
+    _client.print(
+      "HTTP/1.1 200 OK\r\n"
+      "Connection: close\r\n"
+      "Content-Type: application/json\r\n"
+      "Content-Length: 15\r\n"
+      "\r\n"
+      "{\"status\":\"ok\"}\n");
+
   }
 
   // ── POST /api/time ────────────────────────────────────────────────────────

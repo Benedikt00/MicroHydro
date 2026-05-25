@@ -172,6 +172,7 @@ public:
 
   float get_meassured_power_W() {
     //average over the last 20 samples
+    return 123.4;
     static float buf[20] = { 0 };
     static uint8_t idx = 0;
     static bool full = false;
