@@ -5,7 +5,7 @@
 #include <nozzle_control.h>
 #include <telegram_management.h>
 #include <value_monitoring.h>
-#include <webserver.h>
+#include <WebserverAbstractionV2.h>
 #include <wire.h>
 #include <my_log.h>
 /*
@@ -51,7 +51,7 @@ const uint8_t AP_MAX_CON = 4;         // max simultaneous clients
 
 // The ESP32 AP always uses 192.168.4.1 as its gateway/IP by default.
 // You can override this with WiFi.softAPConfig() below if needed.
-static const IPAddress AP_IP(192, 168, 3, thisLORA_ID);
+static const IPAddress AP_IP(192, 168, 4, thisLORA_ID);
 static const uint16_t AP_PORT = 80;
 
 WebserverAbstraction* ws = nullptr;
@@ -270,6 +270,9 @@ void loracom() {
 
         } else {
           //set message
+          tel_out.power = ws->getPowerSetpoint();
+          tel_out.level_pc = ws->getLevelSetpoint();
+          //tel_out.operating_mode = static_cast<int>(ws->getMode()); todo
           payload = tel_out.enc_outgoing_msg();
           waitingForAck = true;
         }
@@ -343,6 +346,7 @@ void WIFI_init() {
 
   // ── Instantiate webserver ─────────────────────────────────────────────
   ws = new WebserverAbstraction(ip, AP_PORT);
+  ws->begin();
 
   ws->setStatusMessage(0, "ESP32 AP started");
   ws->setStatusMessage(1, ("SSID: " + String(AP_SSID)).c_str());
@@ -415,12 +419,12 @@ void write_error_to_display() {
     display.set_error("Temperatur fehler");
     return;
   }
-  if (tel_inc.errors.cpu_power_error) {
+  if (tel_inc.errors.cpu_level_error) {
     display.set_error("Pegelfehler");
     return;
   }
-  if (tel_inc.errors.cpu_power_error) {
-    display.set_error("Leistungsfehler");
+  if (tel_inc.errors.cpu_voltage_error) {
+    display.set_error("Spannungsfehler");
     return;
   }
   if (tel_inc.errors.cpu_main_valve_error) {

@@ -233,6 +233,7 @@ void loracom() {
           if (msg.length() == tel_from_gw.MSG_LENGTH) {                                                              //right len
             if (msg.substring(tel_from_gw.DEVICE_ID_SPOT, tel_from_gw.DEVICE_ID_SPOT + 1).toInt() == thisLORA_ID) {  //for this node
               tel_from_gw.dec_incoming_msg(msg);
+
               sd.write_telegram(msg);
 
               tel_to_cpu.errors.gw_lora_fail = false;
@@ -257,17 +258,16 @@ void loracom() {
       {
 
         //send ack if requested
-        if (waitingToAck && (millis() - lastRecieveTime >= LORA_WAIT_TO_ACK_TIMEOUT)) {
+        if (waitingToAck) {
           payload = "ACK";
           waitingToAck = false;
           //lora_send_reply = true;
-        } else {
+        } else if (millis() - lastRecieveTime >= LORA_WAIT_TO_ACK_TIMEOUT){
           //set message
           payload = tel_to_gw.enc_outgoing_msg();
           waitingForAck = true;
           my_log("Waiting for ack");
         }
-
         //send
         lora_module.transmit(payload);
         lastSendTime = millis();
@@ -328,7 +328,7 @@ void write_error_to_display() {
     return;
   }
 
-  if (tel_to_cpu.tel_to_cpu.errors.rn_bmp_fail){
+  if (tel_to_cpu.errors.rn_bmp_fail){
     display.set_error("BMP sensor failed");
     return;
   }
@@ -396,7 +396,7 @@ void error_management() {
     tel_to_gw.errors.cpu_not_reachable;
   }
   if (millis() - lastRecieveTime >= 300000) {
-    tel_out.errors.remoteNode_not_reachable = true;
+    tel_to_gw.errors.remoteNode_not_reachable = true;
   }
 
 
@@ -518,7 +518,7 @@ void WIFI_loop() {
       display.update();
 
       //olta jaaa, message zu versenden
-      if (sendFlag && message.length() > 0) {
+      if (sendFlag && message.length() > 0 && (millis() - round_trip_start > 10000)) {
         bool valid = true;
         for (int i = 0; i < message.length(); i++) {
           if (!isDigit(message[i]) && message[i] != '.') {

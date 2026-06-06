@@ -3,7 +3,8 @@
 //  Arduino / Opta platform
 // ============================================================
 #define LOG_PLATFORM_OPTA
-
+#define __TYPES_H__
+typedef unsigned long millis_t;
 #include <OptaBlue.h>
 #include "opta_abs.h"
 #include "WebserverAbstraction.h"
@@ -36,7 +37,7 @@ static const uint8_t AP_CHANNEL = 6;
 static const uint16_t WS_PORT = 80;
 static IPAddress AP_IP(192, 168, 3, 1);
 const int esp_send_time = 300000;
-unsigned long last_esp_send{ 0 };
+millis_t last_esp_send{ 0 };
 
 // ── Telegram management ───────────────────────────────────────────────────────────
 telegram_management tel_inc(1);
@@ -131,6 +132,9 @@ bool is_day = true;
 ControlMode cmi = ControlMode::UNKNOWN;      // primary mode
 ControlMode cmi_sec = ControlMode::UNKNOWN;  // secondary (night sub-mode)
 //ControlMode cmi_previous = ControlMode::UNKNOWN;  // check if changed
+millis_t cmi_begin{0};
+bool turbine_inverter_startup_active{false};
+millis_t turbine_inverter_startup_time = 20000;
 
 float setpoint_power_w = 0.0f;   // [W]
 float setpoint_level_pc = 0.0f;  //  0–100
@@ -163,6 +167,20 @@ static int clampi(int v, int lo, int hi) {
   return v < lo ? lo : (v > hi ? hi : v);
 }
 
+// ────────────────────────────────────────────────────────────
+//  Error Parameters
+// ────────────────────────────────────────────────────────────
+millis_t time_v_wo_p{0};
+const millis_t MAX_TIME_V_WO_P = 3600000;
+bool time_v_wo_p_monitoring_active{0};
+const float NO_VOLTAGE_THRESHOLD = 3.0;
+const float INV_ON_VOLTAGE_THRESHOLD = 18.0;
+
+millis_t time_wo_p{0};
+const millis_t MAX_TIME_WO_P = 24 * 3600000;
+bool time_wo_p_monitoring_active{0};
+const float NO_POWER_THRESHOLD = 5.0;
+
 // ============================================================
 //  Schedule callbacks (called by TimeScheduler)
 // ============================================================
@@ -189,8 +207,15 @@ void handle_new_msg() {
     if (cmi != ControlMode::UNKNOWN) {
       ws.setMessage(tel_out.enc_outgoing_msg().c_str());
       last_esp_send = millis();
-      my_log("WS send set after reiint of subcomponent");
+      my_log("WS send set after reint of subcomponent");
     }
+  }else{
+    if (cpu->select_remote){
+      set_control_mode(ws->getMode());
+    }
+  }
+  if (tel_inc.ack_in == 1){
+    error_acknowledge();
   }
   //todo, inc to out
 }
@@ -273,21 +298,18 @@ void set_control_mode(ControlMode requested_mode,
       lc_indirect_setpoint = setpoint_level_pc;
       //cmi_sec = is_day ? ControlMode::FILLING : ControlMode::CONSTANT_LEVEL;  //todo check if needs to be filling
       my_log("CMI set to CONSTANT_LEVEL/NIGHT");
-
       break;
 
     case ControlMode::FILLING:
       cmi = ControlMode::FILLING;
       cmi_sec = ControlMode::UNKNOWN;
       my_log("CMI set to FILLING");
-
       break;
 
     default:
       cmi = ControlMode::STOP;
       cmi_sec = ControlMode::UNKNOWN;
       my_log("CMI set to STOP");
-
       break;
   }
 }
@@ -311,8 +333,10 @@ void wifi_loop() {
     }
   }
 
+  ws.setStatusShortSetpoint(controlModeStr(cmi).c_str());
+
   if (ws.getAckErrors()) {
-    // handle error acknowledgement
+    error_acknowledge();
     ws.resetAck();
   }
 
@@ -593,11 +617,24 @@ void run_control_mode() {
     cpu->ball_valve_cv = true;
   };
 
+  
   // Resolve the effective mode when a secondary is active
   ControlMode effective = cmi;
   /*if (cmi == ControlMode::CONSTANT_POWER_NIGHT || cmi == ControlMode::CONSTANT_LEVEL_NIGHT) {
     effective = cmi_sec;
   }*/
+
+  //handle errors to stop
+  if (tel_out.errors.cpu_es_triggered
+      //|| tel_out.errors.cpu_voltage_error
+      || tel_out.errors.cpu_preassure_error
+      || tel_out.errors.cpu_level_error
+      || tel_out.errors.cpu_floater_triggered
+      || tel_out.errors.iv_no_p_while_v
+      || tel_out.errors.gen_to_many_errors      
+      ){
+        effective = ControlMode::STOP;
+      }
 
   switch (effective) {
 
@@ -605,8 +642,6 @@ void run_control_mode() {
     case ControlMode::STOP:
     case ControlMode::UNKNOWN:
       stop_all();
-      lamp_green = LampState::BLINK_SLOW;
-      lamp_red = LampState::OFF;
       break;
 
     // ── FILLING ──────────────────────────────────────────
@@ -620,8 +655,6 @@ void run_control_mode() {
           setpoint_level_pc);
       } else {
         open_fill();
-        lamp_green = LampState::BLINK_FAST;
-        lamp_red = LampState::OFF;
       }
       break;
 
@@ -652,7 +685,97 @@ void stageing_test(float power) {
 // ============================================================
 //  Error / safety management
 // ============================================================
-void error_management() {
+void power_timeout_monitoring(){
+  if (cpu->voltage_V < NO_VOLTAGE_THRESHOLD){
+ 
+  }else if (cpu->voltage_V < INV_ON_VOLTAGE_THRESHOLD){ // voltage here
+    if (cpu->get_meassured_power_W() < NO_POWER_THRESHOLD){//no power
+      if (!time_v_wo_p_monitoring_active){
+        time_v_wo_p = millis();
+        time_v_wo_p_monitoring_active = true;
+      }
+    }else{
+      time_v_wo_p_monitoring_active = false;
+    }
+  }
+
+  if (time_v_wo_p_monitoring_active && (millis() - time_v_wo_p > MAX_TIME_V_WO_P)){
+    tel_out.errors.iv_no_p_while_v = true;
+  }
+
+  if (cpu->get_meassured_power_W() < NO_POWER_THRESHOLD){
+    if (!time_wo_p_monitoring_active){
+      time_wo_p = millis();
+      time_wo_p_monitoring_active = true;
+    }
+  }
+  else{
+    time_wo_p_monitoring_active = false;
+  }
+
+  if (time_wo_p_monitoring_active && (millis() - time_wo_p > MAX_TIME_WO_P)){
+    tel_out.errors.gen_no_power_all_day = true;
+  }
+
+}
+
+bool to_many_errors(){
+  int errors_active = 0;
+
+  if (tel_out.errors.remoteNode_not_reachable) errors_active += 1;
+  if (tel_out.errors.gateway_not_reachable) errors_active += 1;
+  if (tel_out.errors.level_station_not_reachable) errors_active += 1;
+  if (tel_out.errors.cpu_time_not_set) errors_active += 1;
+  if (tel_out.errors.rn_lora_ini_fail) errors_active += 1;
+  if (tel_out.errors.rn_wlan_ini_fail) errors_active += 1;
+  if (tel_out.errors.rn_lcd_fail) errors_active += 1;
+  if (tel_out.errors.rn_bmp_fail) errors_active += 1;
+  if (tel_out.errors.gw_lcd_fail) errors_active += 1;
+  if (tel_out.errors.gw_lora_fail) errors_active += 1;
+  if (tel_out.errors.gw_wlan_ini_fail) errors_active += 1;
+  if (tel_out.errors.iv_no_p_while_v) errors_active += 1;
+  if (tel_out.errors.gen_no_power_all_day) errors_active += 1;
+  //if (tel_out.errors.gen_to_many_errors) errors_active += 1;
+  if (tel_out.errors.cpu_es_triggered) errors_active += 1;
+  if (tel_out.errors.cpu_voltage_error) errors_active += 1;
+  if (tel_out.errors.cpu_preassure_error) errors_active += 1;
+  if (tel_out.errors.cpu_temp_error_general) errors_active += 1;
+  if (tel_out.errors.cpu_floater_triggered) errors_active += 1;
+  if (tel_out.errors.cpu_main_valve_error) errors_active += 1;
+  if (tel_out.errors.cpu_valve1_error) errors_active += 1;
+  if (tel_out.errors.cpu_valve2_error) errors_active += 1;
+  if (tel_out.errors.cpu_com_to) errors_active += 1;
+  if (tel_out.errors.cpu_temp_to_low) errors_active += 1;
+  if (tel_out.errors.cpu_level_error) errors_active += 1;
+
+  if (errors_active >= 4){
+    return true;
+  }
+  return false;
+
+}
+
+void setting_errors(){
+
+  power_timeout_monitoring();
+  if (cpu->float_switch_triggered){
+    tel_out.errors.cpu_floater_triggered = true;
+  }
+
+  if (to_many_errors()){
+    tel_out.errors.gen_to_many_errors = true;
+  }
+
+
+
+  
+
+}
+
+void error_management_gen() {
+
+  setting_errors();
+
   // RTC timeout warning
   if (!is_time_set && millis() > 300000UL) {
     lamp_red = LampState::BLINK_SLOW;  // signal time-not-set
@@ -662,7 +785,7 @@ void error_management() {
   float level = cpu->level_meassured_p;
 
   // Overfill guard: if level ever exceeds 101 %, drain back to 90 %
-  /*if (level > 1.01f) {
+  if (level > 1.01f) {
     set_control_mode(ControlMode::CONSTANT_LEVEL, 0.0f, 0.90f);
     lamp_red = LampState::BLINK_FAST; 
   }
@@ -675,7 +798,7 @@ void error_management() {
       set_control_mode(ControlMode::CONSTANT_LEVEL, 0.0f, NIGHT_DRAIN_SETPOINT);
     }
     lamp_red = LampState::BLINK_FAST;
-  }*/
+  }
 
   //Value monitoring
   if (!monitor_valve1.set_target(cpu->valve1_cv_pc)) {
@@ -691,9 +814,15 @@ void error_management() {
   monitor_bv.set_target(cpu->ball_valve_cv);
   int v_mon_bv_status = monitor_bv.monitor(cpu->ball_valve_open, cpu->ball_valve_closed);
   if (v_mon_bv_status != 0) {
-    my_log("Value monitoor error Ball Valve, status: " + String(v_mon_bv_status));
+    my_log("Value monitor error Ball Valve, status: " + String(v_mon_bv_status));
   }
   
+}
+
+void error_acknowledge(){
+  tel_out.errors.iv_no_p_while_v = false;
+  tel_out.errors.gen_to_many_errors = false;
+  tel_out.errors.cpu_floater_triggered = false;
 }
 
 // ============================================================
@@ -847,6 +976,7 @@ void setup() {
 // ============================================================
 void loop() {
   cpu->read_inputs();
+  cpu->surround_temp_dC = ws.getTemp();
 
   if (is_time_set) {
     scheduler.tick();
@@ -868,15 +998,16 @@ void loop() {
 
   LEDs::update();
 
-  //error_management();
+  //error_management_gen();
 
   // 7. Write all outputs
   // Push live values into the webserver state
   ws.setPower(cpu->get_meassured_power_W());
   ws.setLevel(cpu->level_meassured_p);
-  ws.setMode(cmi);
 
-  cpu->surround_temp_dC = ws.getTemp();
+  ws.setPowerSetpoint(setpoint_power_w);
+  ws.setLevelSetpoint(setpoint_level_pc);
+
   ws.setStatusShort(controlModeStr(cmi).c_str());
 
   //logIOState(millis());

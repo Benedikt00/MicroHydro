@@ -659,7 +659,7 @@ private:
 
       if (rq_msg.length() >= 20) {
         if (rq_msg[23] == '0') {  //cm unknown
-          my_log("CM unknown");
+          my_log("CM incomeing unknown");
 
           for (int i = 0; i <= 9; i++) {
             if (rq_msg[i] != '0') {
